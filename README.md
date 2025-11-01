@@ -1,4 +1,7 @@
-![Logo](assets/logo.png)
+<p>
+  <img src="assets/logo.png" alt="Logo" width="100">
+</p>
+
 # YouTube API Legacy
 
 [![Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/)
@@ -8,7 +11,6 @@ This is a legacy YouTube API service that provides endpoints for fetching video 
 Part of the LegacyProjects initiative, bringing back the classic YouTube experience.<br><br>
 This is a remaster of [this repository](https://github.com/zemonkamin/ytapilegacy).
 
-<br>
 
 ## Installation
 
