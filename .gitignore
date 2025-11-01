@@ -3,3 +3,6 @@ target/
 *.swp
 *.swo
 Cargo.lock
+assets/yt-dlp.exe
+assets/yt-dlp_linux
+assets/yt-dlp

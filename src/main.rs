@@ -1,98 +1,72 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Responder, middleware::Logger};
+use actix_files as fs;
 use serde::{Deserialize, Serialize};
+use std::fs as stdfs;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 mod config;
 use config::Config;
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        health_check,
+        index,
+    ),
+    components(
+        schemas(Config)
+    ),
+    tags(
+        (name = "YouTube Legacy API", description = "API server created to support YouTube clients for old devices")
+    )
+)]
+struct ApiDoc;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct AppState {
     config: Config,
 }
 
+/// Health check endpoint
+/// 
+/// Returns a simple status message to indicate the API is running
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses(
+        (status = 200, description = "API is running", body = String)
+    )
+)]
 async fn health_check() -> impl Responder {
     log::info!("Health check endpoint called");
     HttpResponse::Ok().json("YouTube API Legacy is running!")
 }
 
+/// Main index page
+/// 
+/// Returns an HTML page with information about the API
+#[utoipa::path(
+    get,
+    path = "/",
+    responses(
+        (status = 200, description = "HTML page with API information")
+    )
+)]
 async fn index(data: web::Data<AppState>) -> impl Responder {
     log::info!("Index page requested");
     let port = data.config.port;
-    let html = format!(r#"
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>YouTube Legacy API</title>
-        <style>
-            body {{
-                margin: 0;
-                padding: 0;
-                font-family: 'Segoe UI', sans-serif;
-                background: #1a1a1a;
-                color: #fff;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                min-height: 100vh;
-            }}
-            .container {{
-                text-align: center;
-                padding: 20px;
-                max-width: 800px;
-            }}
-            h1 {{
-                font-size: 2.5em;
-                margin: 0;
-                color: #fff;
-            }}
-            .subtitle {{
-                font-size: 1.2em;
-                color: #888;
-                margin: 10px 0 30px;
-            }}
-            .tile {{
-                background: #2d2d2d;
-                border-radius: 10px;
-                padding: 20px;
-                margin: 10px 0;
-                text-align: left;
-            }}
-            .tile h2 {{
-                margin: 0 0 10px;
-                color: #fff;
-            }}
-            .tile p {{
-                margin: 0;
-                color: #888;
-            }}
-            .footer {{
-                margin-top: 40px;
-                color: #666;
-                font-size: 0.9em;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>YouTube Legacy API</h1>
-            <div class="subtitle">A Windows Phone inspired YouTube API service</div>
-            <div class="tile">
-                <h2>Status</h2>
-                <p>API is running on port {}</p>
-            </div>
-            <div class="footer">
-                LegacyProjects YouTube API Service
-            </div>
-        </div>
-    </body>
-    </html>
-    "#, port);
+    
+    // Read the HTML file
+    let html_content = stdfs::read_to_string("assets/html/index.html")
+        .unwrap_or_else(|_| "Error loading HTML file".to_string());
+    
+    // Replace the placeholder with the actual port
+    let html_content = html_content.replace("<!--PORT-->", &port.to_string());
     
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(html)
+        .body(html_content)
 }
 
 #[actix_web::main]
@@ -113,10 +87,17 @@ async fn main() -> std::io::Result<()> {
     
     let app_state = web::Data::new(AppState { config });
     
+    let openapi = ApiDoc::openapi();
+    
     let server = HttpServer::new(move || {
         App::new()
             .app_data(app_state.clone())
             .wrap(Logger::default())
+            .service(fs::Files::new("/assets", "assets/").show_files_listing())
+            .service(
+                SwaggerUi::new("/docs/{_:.*}")
+                    .url("/openapi.json", openapi.clone())
+            )
             .route("/", web::get().to(index))
             .route("/health", web::get().to(health_check))
     })
@@ -124,6 +105,7 @@ async fn main() -> std::io::Result<()> {
     .run();
     
     log::info!("Server running at http://127.0.0.1:{}/", port);
+    log::info!("Documentation available at http://127.0.0.1:{}/docs", port);
     
     server.await
 }
