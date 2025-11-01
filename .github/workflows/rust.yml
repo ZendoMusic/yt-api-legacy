@@ -18,12 +18,12 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: ytapilegacy-linux-x64
-            bin_path: target/x86_64-unknown-linux-gnu/release/ytapilegacy
+            bin_path: target/debug/ytapilegacy
 
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: ytapilegacy-windows-x64
-            bin_path: target/x86_64-pc-windows-msvc/release/ytapilegacy.exe
+            bin_path: target/debug/ytapilegacy.exe
 
     steps:
       - uses: actions/checkout@v4
