@@ -15,23 +15,15 @@ jobs:
     strategy:
       matrix:
         include:
-          # --- x64 builds ---
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact_name: ytapilegacy-linux-x64
-
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: ytapilegacy-windows-x64
-
-          # --- x32 builds ---
           - os: ubuntu-latest
             target: i686-unknown-linux-gnu
-            artifact_name: ytapilegacy-linux-x32
+            artifact_name: ytapilegacy-linux-x86
+            bin_path: target/i686-unknown-linux-gnu/release/ytapilegacy
 
           - os: windows-latest
             target: i686-pc-windows-msvc
-            artifact_name: ytapilegacy-windows-x32
+            artifact_name: ytapilegacy-windows-x86
+            bin_path: target/i686-pc-windows-msvc/release/ytapilegacy.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -46,4 +38,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: target/${{ matrix.target }}/release/
+          path: ${{ matrix.bin_path }}
