@@ -15,21 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build on Linux
-        run: cargo build --release
-      - name: Upload Linux artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ytapilegacy-linux-x64
-          path: target/release/ytapilegacy
+        run: cargo build --verbose
 
   build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - name: Build on Windows
-        run: cargo build --release
-      - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ytapilegacy-windows-x64
-          path: target\release\ytapilegacy.exe
+        run: cargo build --verbose
