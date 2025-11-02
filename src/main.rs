@@ -23,6 +23,8 @@ use routes::auth::{AuthConfig, TokenStore};
         routes::auth::oauth_callback,
         routes::auth::account_info,
         routes::search::get_top_videos,
+        routes::search::get_search_videos,
+        routes::search::get_search_suggestions,
     ),
     components(
         schemas(
@@ -31,6 +33,8 @@ use routes::auth::{AuthConfig, TokenStore};
             routes::auth::GoogleAccount,
             routes::auth::YouTubeChannel,
             routes::search::TopVideo,
+            routes::search::SearchResult,
+            routes::search::SearchSuggestions,
         )
     ),
     tags(
@@ -126,6 +130,10 @@ async fn main() -> std::io::Result<()> {
             .route("/oauth/callback", web::get().to(routes::auth::oauth_callback))
             .route("/account_info", web::get().to(routes::auth::account_info))
             .route("/get_top_videos.php", web::get().to(routes::search::get_top_videos))
+            .route("/get_search_videos.php", web::get().to(routes::search::get_search_videos))
+            .route("/get_search_suggestions.php", web::get().to(routes::search::get_search_suggestions))
+            .route("/thumbnail/{video_id}", web::get().to(routes::video::thumbnail_proxy))
+            .route("/channel_icon/{path_video_id}", web::get().to(routes::video::channel_icon))
     })
     .bind(("127.0.0.1", port))?
     .run();

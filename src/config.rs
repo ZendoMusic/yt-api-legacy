@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use utoipa::ToSchema;
 
 #[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
@@ -28,6 +29,8 @@ pub struct Config {
     #[serde(default = "cache_cleanup_threshold_mb")]
     pub cache_cleanup_threshold_mb: u32,
 }
+
+static API_KEY_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn default_port() -> u16 {
     2823
@@ -58,5 +61,14 @@ impl Config {
         } else {
             &self.api_keys[0]
         }
+    }
+    
+    pub fn get_api_key_rotated(&self) -> &str {
+        if self.api_keys.is_empty() {
+            return "";
+        }
+        
+        let index = API_KEY_COUNTER.fetch_add(1, Ordering::Relaxed) % self.api_keys.len();
+        &self.api_keys[index]
     }
 }

@@ -7,7 +7,6 @@ use qrcode::QrCode;
 use uuid::Uuid;
 use image::{DynamicImage, Rgb, RgbImage};
 use base64::{Engine as _, engine::general_purpose};
-// heh
 pub struct TokenStore {
     tokens: Arc<Mutex<HashMap<String, String>>>,
 }
