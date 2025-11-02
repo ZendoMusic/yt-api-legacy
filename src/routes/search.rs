@@ -34,7 +34,7 @@ pub struct SearchSuggestions {
 }
 
 async fn get_channel_thumbnail(channel_id: &str, api_key: &str, config: &crate::config::Config) -> String {
-    if !config.fetch_channel_thumbnails {
+    if !config.proxy.fetch_channel_thumbnails {
         return "".to_string();
     }
     
@@ -100,7 +100,7 @@ pub async fn get_top_videos(
                 None
             }
         })
-        .unwrap_or(config.default_count as i32);
+        .unwrap_or(config.video.default_count as i32);
     
     let count = count.min(50).max(1);
     
@@ -136,7 +136,7 @@ pub async fn get_top_videos(
                                     .unwrap_or("Unknown Author")
                                     .to_string();
                                 
-                                let thumbnail = format!("{}/thumbnail/{}", config.mainurl.trim_end_matches('/'), video_id);
+                                let thumbnail = format!("{}/thumbnail/{}", config.server.mainurl.trim_end_matches('/'), video_id);
                                 
                                 let channel_thumbnail = "".to_string();
                                 
@@ -209,7 +209,7 @@ pub async fn get_search_videos(
     
     let count: i32 = query_params.get("count")
         .and_then(|c| c.parse().ok())
-        .unwrap_or(config.default_count as i32);
+        .unwrap_or(config.video.default_count as i32);
     
     let search_type = query_params.get("type")
         .map(|t| t.as_str())
@@ -282,7 +282,7 @@ pub async fn get_search_videos(
                                             continue;
                                         }
                                         
-                                        let thumbnail = format!("{}/thumbnail/{}", config.mainurl.trim_end_matches('/'), video_id.as_ref().unwrap());
+                                        let thumbnail = format!("{}/thumbnail/{}", config.server.mainurl.trim_end_matches('/'), video_id.as_ref().unwrap());
                                         let channel_thumbnail = if let Some(channel_id_str) = &channel_id {
                                             get_channel_thumbnail(channel_id_str, &apikey, config).await
                                         } else {
@@ -316,7 +316,7 @@ pub async fn get_search_videos(
                                             .unwrap_or("")
                                             .to_string();
                                         
-                                        let channel_thumbnail = format!("{}/channel_icon/{}", config.mainurl.trim_end_matches('/'), channel_id.as_ref().unwrap());
+                                        let channel_thumbnail = format!("{}/channel_icon/{}", config.server.mainurl.trim_end_matches('/'), channel_id.as_ref().unwrap());
                                         
                                         SearchResult {
                                             title,
@@ -355,7 +355,7 @@ pub async fn get_search_videos(
                                         }
                                         
                                         let thumbnail = if !video_id.is_empty() {
-                                            format!("{}/thumbnail/{}", config.mainurl.trim_end_matches('/'), video_id)
+                                            format!("{}/thumbnail/{}", config.server.mainurl.trim_end_matches('/'), video_id)
                                         } else {
                                             item_info.get("thumbnails")
                                                 .and_then(|thumbs| thumbs.get("high"))

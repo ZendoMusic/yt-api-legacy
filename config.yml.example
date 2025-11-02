@@ -1,0 +1,69 @@
+server:
+  # server port
+  port: 2823
+  
+  # main instance (soon to be removed)
+  mainurl: "http://localhost:2823/"
+
+  # secret key for the application
+  secretkey: "YOUR_SECRET_KEY"
+
+  # frontend URL
+  frontend_url: "http://localhost:3000"
+
+api:
+  # yt api keys
+  api_keys:
+    - "YOUR_YOUTUBE_API_KEY_1"
+    - "YOUR_YOUTUBE_API_KEY_2"
+  
+  # oauth config
+  oauth_client_id: "YOUR_OAUTH_CLIENT_ID"
+  oauth_client_secret: "YOUR_OAUTH_CLIENT_SECRET"
+  
+  # request timeout in seconds
+  request_timeout: 30
+
+video:
+  # default video quality
+  default_quality: "360"
+
+  # available video qualities
+  available_qualities:
+    - "144"
+    - "240"
+    - "360"
+    - "480"
+    - "720"
+    - "1080"
+    - "1440"
+    - "2160"
+  
+  # video source - direct or proxy
+  video_source: "direct"
+  
+  # use cookies for requests
+  use_cookies: true
+  
+  # default count for search results
+  default_count: 50
+
+proxy:
+  # enable thumbnail proxy
+  use_thumbnail_proxy: true
+  
+  # enable channel thumbnail proxy
+  use_channel_thumbnail_proxy: false
+  
+  # enable video proxy
+  use_video_proxy: true
+  
+  # fetch channel thumbnails
+  fetch_channel_thumbnails: false
+
+cache:
+  # temporary folder maximum size in MB
+  temp_folder_max_size_mb: 5120
+  
+  # cache cleanup threshold in MB
+  cache_cleanup_threshold_mb: 100

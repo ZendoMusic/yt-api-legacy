@@ -11,35 +11,56 @@ pub fn perform_startup_checks() {
 }
 
 fn check_and_generate_config() {
-    if !Path::new("config.json").exists() {
-        log::warn!("config.json not found. Generating default config...");
+    if !Path::new("config.yml").exists() {
+        log::warn!("config.yml not found. Generating default config...");
         
-        let default_config = r#"{
-    "api_key": "YOUR_API_KEY_HERE",
-    "available_qualities": ["144", "240", "360", "480", "720", "1080", "1440", "2160"],
-    "default_quality": "360",
-    "fetch_channel_thumbnails": false,
-    "mainurl": "http://localhost:2823/",
-    "oauth_client_id": "YOUR_OAUTH_CLIENT_ID",
-    "oauth_client_secret": "YOUR_OAUTH_CLIENT_SECRET",
-    "port": 2823,
-    "request_timeout": 30,
-    "secretkey": "YOUR_SECRET_KEY",
-    "use_channel_thumbnail_proxy": false,
-    "use_cookies": true,
-    "use_thumbnail_proxy": true,
-    "use_video_proxy": true,
-    "video_source": "direct"
-}"#;
+        let default_config = r#"server:
+  port: 2823
+  mainurl: "http://localhost:2823/"
+  secretkey: "YOUR_SECRET_KEY"
+  frontend_url: "http://localhost:3000"
+
+api:
+  api_keys:
+    - "YOUR_YOUTUBE_API_KEY_1"
+    - "YOUR_YOUTUBE_API_KEY_2"
+  oauth_client_id: "YOUR_OAUTH_CLIENT_ID"
+  oauth_client_secret: "YOUR_OAUTH_CLIENT_SECRET"
+  request_timeout: 30
+
+video:
+  default_quality: "360"
+  available_qualities:
+    - "144"
+    - "240"
+    - "360"
+    - "480"
+    - "720"
+    - "1080"
+    - "1440"
+    - "2160"
+  video_source: "direct"
+  use_cookies: true
+  default_count: 50
+
+proxy:
+  use_thumbnail_proxy: true
+  use_channel_thumbnail_proxy: false
+  use_video_proxy: true
+  fetch_channel_thumbnails: false
+
+cache:
+  temp_folder_max_size_mb: 5120
+  cache_cleanup_threshold_mb: 100"#;
         
-        if let Err(e) = fs::write("config.json", default_config) {
-            log::error!("Failed to create default config.json: {}", e);
+        if let Err(e) = fs::write("config.yml", default_config) {
+            log::error!("Failed to create default config.yml: {}", e);
             std::process::exit(1);
         }
         
-        log::info!("Default config.json created. Please update it with your actual values.");
+        log::info!("Default config.yml created. Please update it with your actual values.");
     } else {
-        log::info!("CHECK: config.json found.");
+        log::info!("CHECK: config.yml found.");
     }
 }
 

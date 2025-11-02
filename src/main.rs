@@ -69,7 +69,7 @@ async fn health_check() -> impl Responder {
 )]
 async fn index(data: web::Data<AppState>) -> impl Responder {
     log::info!("Index page requested");
-    let port = data.config.port;
+    let port = data.config.server.port;
     
     let html_content = stdfs::read_to_string("assets/html/index.html")
         .unwrap_or_else(|_| "Error loading HTML file".to_string());
@@ -87,13 +87,13 @@ async fn main() -> std::io::Result<()> {
     
     check::perform_startup_checks();
     
-    let config = Config::from_file("config.json")
-        .expect("Failed to load config.json");
+    let config = Config::from_file("config.yml")
+        .expect("Failed to load config.yml");
     
     let auth_config = AuthConfig {
-        client_id: config.oauth_client_id.clone(),
-        client_secret: config.oauth_client_secret.clone(),
-        redirect_uri: format!("http://localhost:{}/oauth/callback", config.port),
+        client_id: config.api.oauth_client_id.clone(),
+        client_secret: config.api.oauth_client_secret.clone(),
+        redirect_uri: format!("http://localhost:{}/oauth/callback", config.server.port),
         scopes: vec![
             "https://www.googleapis.com/auth/youtube.readonly".to_string(),
             "https://www.googleapis.com/auth/youtube".to_string(),
@@ -105,7 +105,7 @@ async fn main() -> std::io::Result<()> {
     let auth_config_data = web::Data::new(auth_config);
     let token_store_data = web::Data::new(TokenStore::new());
     
-    let port = config.port;
+    let port = config.server.port;
     log::info!("Starting YouTube API Legacy server on port {}...", port);
     
     let app_state = web::Data::new(AppState { config });
