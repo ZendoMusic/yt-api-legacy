@@ -6,6 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use lru::LruCache;
 use tokio::sync::Mutex;
 use lazy_static::lazy_static;
+use serde::Serialize;
+use utoipa::ToSchema;
+use chrono::DateTime;
 
 lazy_static! {
     static ref THUMBNAIL_CACHE: Arc<Mutex<LruCache<String, (Vec<u8>, String, u64)>>> = 
@@ -13,6 +16,33 @@ lazy_static! {
 }
 
 const CACHE_DURATION: u64 = 3600;
+
+#[derive(Serialize, ToSchema)]
+pub struct VideoInfoResponse {
+    pub title: String,
+    pub author: String,
+    pub subscriber_count: String,
+    pub description: String,
+    pub video_id: String,
+    pub embed_url: String,
+    pub duration: String,
+    pub published_at: String,
+    pub likes: Option<String>,
+    pub views: Option<String>,
+    pub comment_count: Option<String>,
+    pub comments: Vec<Comment>,
+    pub channel_thumbnail: String,
+    pub thumbnail: String,
+    pub video_url: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct Comment {
+    pub author: String,
+    pub text: String,
+    pub published_at: String,
+    pub author_thumbnail: String,
+}
 
 #[utoipa::path(
     get,
@@ -370,6 +400,281 @@ pub async fn channel_icon(
                 }
             }
             Err(_) => HttpResponse::NotFound().finish(),
+        }
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/get-ytvideo-info.php",
+    params(
+        ("video_id" = String, Query, description = "YouTube video ID"),
+        ("quality" = Option<String>, Query, description = "Video quality"),
+        ("proxy" = Option<String>, Query, description = "Use video proxy (true/false)")
+    ),
+    responses(
+        (status = 200, description = "Video information", body = VideoInfoResponse),
+        (status = 400, description = "Missing video ID"),
+        (status = 500, description = "Internal server error")
+    )
+)]
+pub async fn get_ytvideo_info(
+    req: HttpRequest,
+    data: web::Data<crate::AppState>,
+) -> impl Responder {
+    let config = &data.config;
+    
+
+    let mut query_params: HashMap<String, String> = HashMap::new();
+    for pair in req.query_string().split('&') {
+        let mut parts = pair.split('=');
+        if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+            query_params.insert(key.to_string(), value.to_string());
+        }
+    }
+    
+    let video_id = match query_params.get("video_id") {
+        Some(id) => id.clone(),
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "ID видео не был передан."
+            }));
+        }
+    };
+    
+    let _quality = query_params.get("quality").map(|s| s.as_str()).unwrap_or(&config.video.default_quality);
+    let proxy_param = query_params.get("proxy").map(|s| s.to_lowercase()).unwrap_or("true".to_string());
+    let _use_video_proxy = proxy_param != "false";
+    
+    let apikey = config.get_api_key_rotated();
+    let client = Client::new();
+    
+
+    let video_url = format!(
+        "https://www.googleapis.com/youtube/v3/videos?id={}&key={}&part=snippet,contentDetails,statistics",
+        video_id, apikey
+    );
+    
+    match client.get(&video_url).send().await {
+        Ok(video_resp) => {
+            match video_resp.json::<serde_json::Value>().await {
+                Ok(video_data) => {
+
+                    let video_items = match video_data.get("items").and_then(|i| i.as_array()) {
+                        Some(items) => items,
+                        None => {
+                            return HttpResponse::Ok().json(serde_json::json!({
+                                "error": "Видео не найдено."
+                            }));
+                        }
+                    };
+                    
+                    if video_items.is_empty() {
+                        return HttpResponse::Ok().json(serde_json::json!({
+                            "error": "Видео не найдено."
+                            }));
+                    }
+                    
+                    let video_item = &video_items[0];
+                    let video_info = match video_item.get("snippet") {
+                        Some(info) => info,
+                        None => {
+                            crate::log::info!("Error: Video snippet not found");
+                            return HttpResponse::InternalServerError().json(serde_json::json!({
+                                "error": "Internal server error"
+                            }));
+                        }
+                    };
+                    
+                    let content_details = match video_item.get("contentDetails") {
+                        Some(details) => details,
+                        None => {
+                            crate::log::info!("Error: Content details not found");
+                            return HttpResponse::InternalServerError().json(serde_json::json!({
+                                "error": "Internal server error"
+                            }));
+                        }
+                    };
+                    
+                    let statistics = video_item.get("statistics").unwrap_or(&serde_json::Value::Null);
+                    let channel_id = match video_info.get("channelId").and_then(|id| id.as_str()) {
+                        Some(id) => id,
+                        None => {
+                            crate::log::info!("Error: Channel ID not found");
+                            return HttpResponse::InternalServerError().json(serde_json::json!({
+                                "error": "Internal server error"
+                            }));
+                        }
+                    };
+                    
+
+                    let mut subscriber_count = "0".to_string();
+                    let channel_url = format!(
+                        "https://www.googleapis.com/youtube/v3/channels?id={}&key={}&part=snippet,statistics",
+                        channel_id, apikey
+                    );
+                    
+                    match client.get(&channel_url).send().await {
+                        Ok(channel_resp) => {
+                            match channel_resp.json::<serde_json::Value>().await {
+                                Ok(channel_data) => {
+                                    if let Some(channel_items) = channel_data.get("items").and_then(|i| i.as_array()) {
+                                        if !channel_items.is_empty() {
+                                            if let Some(stats) = channel_items[0].get("statistics") {
+                                                subscriber_count = stats.get("subscriberCount")
+                                                    .and_then(|c| c.as_str())
+                                                    .unwrap_or("0")
+                                                    .to_string();
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    crate::log::info!("Error parsing channel data: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            crate::log::info!("Error fetching channel data: {}", e);
+                        }
+                    }
+                    
+
+                    let final_video_url = if config.video.video_source == "direct" {
+                        format!("{}direct_url?video_id={}", config.server.mainurl, video_id)
+                    } else {
+                        "".to_string()
+                    };
+                    
+                    let final_video_url_with_proxy = if config.proxy.use_video_proxy && !final_video_url.is_empty() {
+                        format!("{}video.proxy?url={}", config.server.mainurl, urlencoding::encode(&final_video_url))
+                    } else {
+                        final_video_url.clone()
+                    };
+                    
+
+                    let mut comments: Vec<Comment> = Vec::new();
+                    let comments_url = format!(
+                        "https://www.googleapis.com/youtube/v3/commentThreads?key={}&textFormat=plainText&part=snippet&videoId={}&maxResults=25",
+                        apikey, video_id
+                    );
+                    
+                    match client.get(&comments_url).send().await {
+                        Ok(comments_resp) => {
+                            match comments_resp.json::<serde_json::Value>().await {
+                                Ok(comments_data) => {
+                                    if let Some(comment_items) = comments_data.get("items").and_then(|i| i.as_array()) {
+                                        for item in comment_items {
+                                            if let Some(comment_snippet) = item
+                                                .get("snippet")
+                                                .and_then(|s| s.get("topLevelComment"))
+                                                .and_then(|c| c.get("snippet")) {
+                                                
+                                                let author = comment_snippet.get("authorDisplayName")
+                                                    .and_then(|a| a.as_str())
+                                                    .unwrap_or("Unknown")
+                                                    .to_string();
+                                                
+                                                let text = comment_snippet.get("textDisplay")
+                                                    .and_then(|t| t.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string();
+                                                
+                                                let published_at = comment_snippet.get("publishedAt")
+                                                    .and_then(|p| p.as_str())
+                                                    .unwrap_or("")
+                                                    .to_string();
+                                                
+                                                let author_thumbnail = if config.proxy.use_channel_thumbnail_proxy {
+                                                    format!("{}channel_icon/{}", config.server.mainurl.trim_end_matches('/'), video_id)
+                                                } else {
+                                                    "".to_string()
+                                                };
+                                                
+                                                comments.push(Comment {
+                                                    author,
+                                                    text,
+                                                    published_at,
+                                                    author_thumbnail,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    crate::log::info!("Error parsing comments data: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            crate::log::info!("Error fetching comments: {}", e);
+                        }
+                    }
+                    
+
+                    let published_at = match video_info.get("publishedAt").and_then(|p| p.as_str()) {
+                        Some(date_str) => {
+                            if let Ok(datetime) = DateTime::parse_from_rfc3339(date_str) {
+                                datetime.format("%d.%m.%Y, %H:%M:%S").to_string()
+                            } else {
+                                date_str.to_string()
+                            }
+                        }
+                        None => "".to_string(),
+                    };
+                    
+
+                    let response = VideoInfoResponse {
+                        title: video_info.get("title")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        author: video_info.get("channelTitle")
+                            .and_then(|a| a.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        subscriber_count,
+                        description: video_info.get("description")
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        video_id: video_id.clone(),
+                        embed_url: format!("https://www.youtube.com/embed/{}", video_id),
+                        duration: content_details.get("duration")
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        published_at,
+                        likes: statistics.get("likeCount")
+                            .and_then(|l| l.as_str())
+                            .map(|s| s.to_string()),
+                        views: statistics.get("viewCount")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        comment_count: statistics.get("commentCount")
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.to_string()),
+                        comments,
+                        channel_thumbnail: format!("{}channel_icon/{}", config.server.mainurl.trim_end_matches('/'), video_id),
+                        thumbnail: format!("{}thumbnail/{}", config.server.mainurl.trim_end_matches('/'), video_id),
+                        video_url: final_video_url_with_proxy,
+                    };
+                    
+                    HttpResponse::Ok().json(response)
+                }
+                Err(e) => {
+                    crate::log::info!("Error parsing video data: {}", e);
+                    HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": "Internal server error"
+                    }))
+                }
+            }
+        }
+        Err(e) => {
+            crate::log::info!("Error fetching video data: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal server error"
+            }))
         }
     }
 }

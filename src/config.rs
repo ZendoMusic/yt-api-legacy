@@ -80,14 +80,6 @@ impl Config {
         Ok(config)
     }
     
-    pub fn get_api_key(&self) -> &str {
-        if self.api.api_keys.is_empty() {
-            ""
-        } else {
-            &self.api.api_keys[0]
-        }
-    }
-    
     pub fn get_api_key_rotated(&self) -> &str {
         if self.api.api_keys.is_empty() {
             return "";

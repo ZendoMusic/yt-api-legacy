@@ -1,4 +1,4 @@
-use actix_web::{web, App, HttpResponse, HttpServer, Responder, middleware::Logger};
+use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use actix_files as fs;
 use serde::{Deserialize, Serialize};
 use std::fs as stdfs;
@@ -25,6 +25,7 @@ use routes::auth::{AuthConfig, TokenStore};
         routes::search::get_top_videos,
         routes::search::get_search_videos,
         routes::search::get_search_suggestions,
+        routes::video::get_ytvideo_info,
     ),
     components(
         schemas(
@@ -35,6 +36,8 @@ use routes::auth::{AuthConfig, TokenStore};
             routes::search::TopVideo,
             routes::search::SearchResult,
             routes::search::SearchSuggestions,
+            routes::video::VideoInfoResponse,
+            routes::video::Comment,
         )
     ),
     tags(
@@ -92,7 +95,6 @@ async fn main() -> std::io::Result<()> {
     
     let auth_config = AuthConfig {
         client_id: config.api.oauth_client_id.clone(),
-        client_secret: config.api.oauth_client_secret.clone(),
         redirect_uri: format!("http://localhost:{}/oauth/callback", config.server.port),
         scopes: vec![
             "https://www.googleapis.com/auth/youtube.readonly".to_string(),
@@ -117,7 +119,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(app_state.clone())
             .app_data(auth_config_data.clone())
             .app_data(token_store_data.clone())
-            .wrap(Logger::default())
+            .wrap(log::SelectiveLogger::default())
             .service(fs::Files::new("/assets", "assets/").show_files_listing())
             .service(
                 SwaggerUi::new("/docs/{_:.*}")
@@ -132,14 +134,15 @@ async fn main() -> std::io::Result<()> {
             .route("/get_top_videos.php", web::get().to(routes::search::get_top_videos))
             .route("/get_search_videos.php", web::get().to(routes::search::get_search_videos))
             .route("/get_search_suggestions.php", web::get().to(routes::search::get_search_suggestions))
+            .route("/get-ytvideo-info.php", web::get().to(routes::video::get_ytvideo_info))
             .route("/thumbnail/{video_id}", web::get().to(routes::video::thumbnail_proxy))
             .route("/channel_icon/{path_video_id}", web::get().to(routes::video::channel_icon))
     })
-    .bind(("127.0.0.1", port))?
+    .bind(("0.0.0.0", port))?
     .run();
     
     log::info!("Server running at http://127.0.0.1:{}/", port);
-    log::info!("Documentation available at http://127.0.0.1:{}/docs", port);
+    log::info!("Documentation available at http://127.0.0.1:{}/docs/", port);
     
     server.await
 }

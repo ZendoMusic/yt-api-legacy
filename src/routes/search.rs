@@ -202,7 +202,7 @@ pub async fn get_search_videos(
         Some(q) => q.clone(),
         None => {
             return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Параметр query не указан"
+                "error": "query parameter not specified"
             }));
         }
     };
@@ -233,26 +233,18 @@ pub async fn get_search_videos(
         apikey
     );
     
-    crate::log::info!("Search URL: {}", url);
-    
     match client.get(&url).send().await {
         Ok(response) => {
             match response.json::<serde_json::Value>().await {
                 Ok(json_data) => {
-                    crate::log::info!("Received {} items from YouTube API", 
-                        json_data.get("items").and_then(|i| i.as_array()).map(|arr| arr.len()).unwrap_or(0));
-                    
                     let mut search_results: Vec<SearchResult> = Vec::new();
                     
                     if let Some(items) = json_data.get("items").and_then(|i| i.as_array()) {
-                        for (index, item) in items.iter().enumerate() {
-                            crate::log::info!("Processing item {}: {:?}", index, item.get("id"));
-                            
+                        for (_index, item) in items.iter().enumerate() {
                             if let Some(item_id) = item.get("id") {
                                 let item_info = match item.get("snippet") {
                                     Some(info) => info,
                                     None => {
-                                        crate::log::info!("Skipping item {} - no snippet", index);
                                         continue;
                                     }
                                 };
@@ -278,7 +270,6 @@ pub async fn get_search_videos(
                                             .map(|id| id.to_string());
                                         
                                         if video_id.is_none() {
-                                            crate::log::info!("Skipping item {} - no videoId", index);
                                             continue;
                                         }
                                         
@@ -305,7 +296,6 @@ pub async fn get_search_videos(
                                             .map(|id| id.to_string());
                                         
                                         if channel_id.is_none() {
-                                            crate::log::info!("Skipping item {} - no channelId", index);
                                             continue;
                                         }
                                         
@@ -334,7 +324,6 @@ pub async fn get_search_videos(
                                             .map(|id| id.to_string());
                                         
                                         if playlist_id.is_none() {
-                                            crate::log::info!("Skipping item {} - no playlistId", index);
                                             continue;
                                         }
                                         
@@ -343,7 +332,6 @@ pub async fn get_search_videos(
                                             .and_then(|thumbs| thumbs.get("high"))
                                             .and_then(|high| high.get("url"))
                                             .and_then(|url| url.as_str()) {
-                                            
                                             if thumbnail_url.contains("i.ytimg.com/vi/") {
                                                 if let Some(start) = thumbnail_url.find("i.ytimg.com/vi/") {
                                                     let start_pos = start + 16;
