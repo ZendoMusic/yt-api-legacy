@@ -26,6 +26,7 @@ use routes::auth::{AuthConfig, TokenStore};
         routes::search::get_search_videos,
         routes::search::get_search_suggestions,
         routes::video::get_ytvideo_info,
+        routes::video::get_related_videos,
     ),
     components(
         schemas(
@@ -38,6 +39,7 @@ use routes::auth::{AuthConfig, TokenStore};
             routes::search::SearchSuggestions,
             routes::video::VideoInfoResponse,
             routes::video::Comment,
+            routes::video::RelatedVideo,
         )
     ),
     tags(
@@ -135,6 +137,7 @@ async fn main() -> std::io::Result<()> {
             .route("/get_search_videos.php", web::get().to(routes::search::get_search_videos))
             .route("/get_search_suggestions.php", web::get().to(routes::search::get_search_suggestions))
             .route("/get-ytvideo-info.php", web::get().to(routes::video::get_ytvideo_info))
+            .route("/get_related_videos.php", web::get().to(routes::video::get_related_videos))
             .route("/thumbnail/{video_id}", web::get().to(routes::video::thumbnail_proxy))
             .route("/channel_icon/{path_video_id}", web::get().to(routes::video::channel_icon))
     })
@@ -142,7 +145,6 @@ async fn main() -> std::io::Result<()> {
     .run();
     
     log::info!("Server running at http://127.0.0.1:{}/", port);
-    log::info!("Documentation available at http://127.0.0.1:{}/docs/", port);
     
     server.await
 }

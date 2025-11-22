@@ -9,6 +9,7 @@ use lazy_static::lazy_static;
 use serde::Serialize;
 use utoipa::ToSchema;
 use chrono::DateTime;
+use urlencoding;
 
 lazy_static! {
     static ref THUMBNAIL_CACHE: Arc<Mutex<LruCache<String, (Vec<u8>, String, u64)>>> = 
@@ -42,6 +43,19 @@ pub struct Comment {
     pub text: String,
     pub published_at: String,
     pub author_thumbnail: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct RelatedVideo {
+    pub title: String,
+    pub author: String,
+    pub video_id: String,
+    pub views: String,
+    pub published_at: String,
+    pub thumbnail: String,
+    pub channel_thumbnail: String,
+    pub url: String,
+    pub source: String,
 }
 
 #[utoipa::path(
@@ -677,4 +691,252 @@ pub async fn get_ytvideo_info(
             }))
         }
     }
+}
+
+#[utoipa::path(
+    get,
+    path = "/get_related_videos.php",
+    params(
+        ("video_id" = String, Query, description = "YouTube video ID"),
+        ("count" = Option<i32>, Query, description = "Number of related videos to return (default: 50)"),
+        ("offset" = Option<i32>, Query, description = "Offset for pagination (default: 0)"),
+        ("limit" = Option<i32>, Query, description = "Limit for pagination (default: 50)"),
+        ("order" = Option<String>, Query, description = "Order of results (relevance, date, rating, viewCount, title) (default: relevance)"),
+        ("token" = Option<String>, Query, description = "Refresh token for InnerTube recommendations")
+    ),
+    responses(
+        (status = 200, description = "List of related videos", body = [RelatedVideo]),
+        (status = 400, description = "Missing video ID"),
+        (status = 500, description = "Internal server error")
+    )
+)]
+pub async fn get_related_videos(
+    req: HttpRequest,
+    data: web::Data<crate::AppState>,
+) -> impl Responder {
+    let config = &data.config;
+    
+    let mut query_params: HashMap<String, String> = HashMap::new();
+    for pair in req.query_string().split('&') {
+        let mut parts = pair.split('=');
+        if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+            query_params.insert(key.to_string(), value.to_string());
+        }
+    }
+    
+    let video_id = match query_params.get("video_id") {
+        Some(id) => id.clone(),
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "ID видео не был передан."
+            }));
+        }
+    };
+    
+    // Handle count parameter (backward compatibility)
+    let count_param: i32 = query_params.get("count")
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(config.video.default_count as i32);
+    
+    // Handle limit parameter (takes precedence over count)
+    let limit: i32 = query_params.get("limit")
+        .and_then(|l| l.parse().ok())
+        .unwrap_or(count_param);
+    
+    // Handle offset parameter
+    let offset: i32 = query_params.get("offset")
+        .and_then(|o| o.parse().ok())
+        .unwrap_or(0);
+    
+    // Handle order parameter
+    let order = query_params.get("order")
+        .map(|o| o.as_str())
+        .unwrap_or("relevance");
+    
+    // Validate order parameter
+    let valid_orders = ["relevance", "date", "rating", "viewCount", "title"];
+    let search_order = if valid_orders.contains(&order) {
+        order
+    } else {
+        "relevance"
+    };
+    
+    // Ensure limit is within reasonable bounds
+    let max_results = limit.min(50).max(1);
+    
+    let apikey = config.get_api_key_rotated();
+    let client = Client::new();
+    
+    // First, get the video information to create a search query
+    let video_url = format!(
+        "https://www.googleapis.com/youtube/v3/videos?part=snippet&id={}&key={}",
+        video_id, apikey
+    );
+    
+    let mut related_videos: Vec<RelatedVideo> = Vec::new();
+    
+    match client.get(&video_url).send().await {
+        Ok(video_resp) => {
+            match video_resp.json::<serde_json::Value>().await {
+                Ok(video_data) => {
+                    if let Some(video_items) = video_data.get("items").and_then(|i| i.as_array()) {
+                        if !video_items.is_empty() {
+                            if let Some(video_info) = video_items[0].get("snippet") {
+                                // Create search query based on the video title
+                                let title = video_info.get("title")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("");
+                                
+                                // Use the first word of the title for search
+                                let search_query = title.split_whitespace().next().unwrap_or(title);
+                                
+                                // Search for related videos with ordering
+                                let search_url = format!(
+                                    "https://www.googleapis.com/youtube/v3/search?part=snippet&q={}&type=video&maxResults={}&order={}&key={}",
+                                    urlencoding::encode(search_query),
+                                    max_results,
+                                    search_order,
+                                    apikey
+                                );
+                                
+                                match client.get(&search_url).send().await {
+                                    Ok(search_resp) => {
+                                        match search_resp.json::<serde_json::Value>().await {
+                                            Ok(search_data) => {
+                                                if let Some(search_items) = search_data.get("items").and_then(|i| i.as_array()) {
+                                                    // Apply offset and limit manually since YouTube API doesn't support offset directly
+                                                    let start_index = offset as usize;
+                                                    let end_index = (offset + max_results) as usize;
+                                                    
+                                                    // Slice the results according to offset and limit
+                                                    let paginated_items = if start_index < search_items.len() {
+                                                        let actual_end = std::cmp::min(end_index, search_items.len());
+                                                        &search_items[start_index..actual_end]
+                                                    } else {
+                                                        &[][..] // Empty slice if offset is beyond available items
+                                                    };
+                                                    
+                                                    for video in paginated_items {
+                                                        // Skip the original video
+                                                        if let Some(vid) = video.get("id").and_then(|id| id.get("videoId")).and_then(|v| v.as_str()) {
+                                                            if vid == video_id {
+                                                                continue;
+                                                            }
+                                                            
+                                                            if let Some(vinfo) = video.get("snippet") {
+                                                                let title = vinfo.get("title")
+                                                                    .and_then(|t| t.as_str())
+                                                                    .unwrap_or("Unknown Title")
+                                                                    .to_string();
+                                                                
+                                                                let author = vinfo.get("channelTitle")
+                                                                    .and_then(|a| a.as_str())
+                                                                    .unwrap_or("Unknown Author")
+                                                                    .to_string();
+                                                                
+                                                                let _channel_id = vinfo.get("channelId")
+                                                                    .and_then(|id| id.as_str())
+                                                                    .unwrap_or("")
+                                                                    .to_string();
+
+                                                                let published_at = vinfo.get("publishedAt")
+                                                                    .and_then(|p| p.as_str())
+                                                                    .unwrap_or("")
+                                                                    .to_string();
+                                                                
+                                                                let thumbnail = format!("{}thumbnail/{}", config.server.mainurl.trim_end_matches('/'), vid);
+                                                                
+                                                                let channel_thumbnail = if config.proxy.use_channel_thumbnail_proxy {
+                                                                    format!("{}channel_icon/{}", config.server.mainurl.trim_end_matches('/'), vid)
+                                                                } else {
+                                                                    "".to_string()
+                                                                };
+                                                                
+                                                                let video_url = format!("{}get-ytvideo-info.php?video_id={}&quality={}", 
+                                                                    config.server.mainurl, vid, config.video.default_quality);
+                                                                
+                                                                let final_url = if config.proxy.use_video_proxy {
+                                                                    format!("{}video.proxy?url={}", config.server.mainurl, urlencoding::encode(&video_url))
+                                                                } else {
+                                                                    video_url
+                                                                };
+                                                                
+                                                                // Get view count
+                                                                let stats_url = format!(
+                                                                    "https://www.googleapis.com/youtube/v3/videos?part=statistics&id={}&key={}",
+                                                                    vid, apikey
+                                                                );
+                                                                
+                                                                let mut view_count = "0".to_string();
+                                                                match client.get(&stats_url).send().await {
+                                                                    Ok(stats_resp) => {
+                                                                        match stats_resp.json::<serde_json::Value>().await {
+                                                                            Ok(stats_data) => {
+                                                                                if let Some(stats_items) = stats_data.get("items").and_then(|i| i.as_array()) {
+                                                                                    if !stats_items.is_empty() {
+                                                                                        view_count = stats_items[0]
+                                                                                            .get("statistics")
+                                                                                            .and_then(|s| s.get("viewCount"))
+                                                                                            .and_then(|v| v.as_str())
+                                                                                            .unwrap_or("0")
+                                                                                            .to_string();
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                            Err(_) => {}
+                                                                        }
+                                                                    }
+                                                                    Err(_) => {}
+                                                                }
+                                                                
+                                                                related_videos.push(RelatedVideo {
+                                                                    title,
+                                                                    author,
+                                                                    video_id: vid.to_string(),
+                                                                    views: view_count,
+                                                                    published_at,
+                                                                    thumbnail,
+                                                                    channel_thumbnail,
+                                                                    url: final_url,
+                                                                    source: "search".to_string(),
+                                                                });
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                crate::log::info!("Error parsing search data: {}", e);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        crate::log::info!("Error fetching search data: {}", e);
+                                    }
+                                }
+                            }
+                        } else {
+                            return HttpResponse::NotFound().json(serde_json::json!({
+                                "error": "Видео не найдено."
+                            }));
+                        }
+                    }
+                }
+                Err(e) => {
+                    crate::log::info!("Error parsing video data: {}", e);
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "error": "Internal server error"
+                    }));
+                }
+            }
+        }
+        Err(e) => {
+            crate::log::info!("Error fetching video data: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal server error"
+            }));
+        }
+    }
+    
+    HttpResponse::Ok().json(related_videos)
 }
