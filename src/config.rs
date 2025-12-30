@@ -47,12 +47,19 @@ pub struct CacheConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
+pub struct InstantInstance {
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
 pub struct Config {
     pub server: ServerConfig,
     pub api: ApiConfig,
     pub video: VideoConfig,
     pub proxy: ProxyConfig,
     pub cache: CacheConfig,
+    #[serde(default)]
+    pub instants: Vec<InstantInstance>,
 }
 
 static API_KEY_COUNTER: AtomicUsize = AtomicUsize::new(0);

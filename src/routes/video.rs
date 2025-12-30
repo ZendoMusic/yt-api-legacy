@@ -1,10 +1,15 @@
 use actix_web::{web, HttpResponse, Responder, HttpRequest};
+use actix_web::http::header::{HeaderValue, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LOCATION};
 use reqwest::Client;
+use futures_util::StreamExt;
 use std::collections::HashMap;
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use lru::LruCache;
 use tokio::sync::Mutex;
+use tokio::task;
 use lazy_static::lazy_static;
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -18,10 +23,121 @@ lazy_static! {
 
 const CACHE_DURATION: u64 = 3600;
 
+fn yt_dlp_binary() -> String {
+    if cfg!(target_os = "windows") {
+        if Path::new("assets/yt-dlp.exe").exists() {
+            return "assets/yt-dlp.exe".to_string();
+        }
+    } else if Path::new("assets/yt-dlp").exists() {
+        return "assets/yt-dlp".to_string();
+    }
+    "yt-dlp".to_string()
+}
+
+async fn resolve_direct_stream_url(
+    video_id: &str,
+    quality: Option<&str>,
+    audio_only: bool,
+    config: &crate::config::Config,
+) -> Option<String> {
+    let video_id = video_id.to_string();
+    let quality = quality
+        .map(|q| q.to_string())
+        .unwrap_or_else(|| config.video.default_quality.clone());
+    let use_cookies = config.video.use_cookies;
+    let yt_dlp = yt_dlp_binary();
+    
+    task::spawn_blocking(move || {
+        let url = format!("https://www.youtube.com/watch?v={}", video_id);
+        let format_selector = if audio_only {
+            "bestaudio/best".to_string()
+        } else {
+            format!("best[height<={}][ext=mp4]/best[ext=mp4]/best", quality)
+        };
+        
+        let mut cmd = Command::new(yt_dlp);
+        cmd.arg("-f")
+            .arg(format_selector)
+            .arg("--get-url")
+            .arg(&url);
+        
+        if use_cookies {
+            let cookie_paths = ["assets/cookies.txt", "cookies.txt"];
+            for path in &cookie_paths {
+                if Path::new(path).exists() {
+                    cmd.arg("--cookies").arg(path);
+                    break;
+                }
+            }
+        }
+        
+        match cmd.output() {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                stdout.lines().find(|l| !l.trim().is_empty()).map(|s| s.to_string())
+            }
+            _ => None,
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn proxy_stream_response(
+    target_url: &str,
+    req: &HttpRequest,
+    default_content_type: &str,
+) -> HttpResponse {
+    let client = Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+        .build()
+        .unwrap();
+    
+    let mut request_builder = client.get(target_url);
+    if let Some(range_header) = req.headers().get("Range") {
+        request_builder = request_builder.header("Range", range_header.clone());
+    }
+    
+    match request_builder.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let content_type = headers
+                .get(CONTENT_TYPE)
+                .and_then(|ct| ct.to_str().ok())
+                .unwrap_or(default_content_type)
+                .to_string();
+            
+            let stream = resp.bytes_stream().map(|item| {
+                item.map_err(|e| actix_web::error::ErrorBadGateway(e))
+            });
+            
+            let mut builder = HttpResponse::build(status);
+            for (key, value) in headers.iter() {
+                // Skip hop-by-hop headers
+                if key == "connection" || key == "transfer-encoding" {
+                    continue;
+                }
+                builder.insert_header((key.clone(), value.clone()));
+            }
+            builder.insert_header((CONTENT_TYPE, HeaderValue::from_str(&content_type).unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"))));
+            builder.streaming(stream)
+        }
+        Err(e) => {
+            crate::log::info!("Proxy request failed: {}", e);
+            HttpResponse::BadGateway().json(serde_json::json!({
+                "error": "Failed to proxy request"
+            }))
+        }
+    }
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct VideoInfoResponse {
     pub title: String,
     pub author: String,
+    #[serde(rename = "subscriberCount")]
     pub subscriber_count: String,
     pub description: String,
     pub video_id: String,
@@ -56,6 +172,11 @@ pub struct RelatedVideo {
     pub channel_thumbnail: String,
     pub url: String,
     pub source: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct DirectUrlResponse {
+    pub video_url: String,
 }
 
 #[utoipa::path(
@@ -535,10 +656,10 @@ pub async fn get_ytvideo_info(
                                     if let Some(channel_items) = channel_data.get("items").and_then(|i| i.as_array()) {
                                         if !channel_items.is_empty() {
                                             if let Some(stats) = channel_items[0].get("statistics") {
-                                                subscriber_count = stats.get("subscriberCount")
-                                                    .and_then(|c| c.as_str())
-                                                    .unwrap_or("0")
-                                                    .to_string();
+                        subscriber_count = stats.get("subscriberCount")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("0")
+                            .to_string();
                                             }
                                         }
                                     }
@@ -599,11 +720,11 @@ pub async fn get_ytvideo_info(
                                                     .unwrap_or("")
                                                     .to_string();
                                                 
-                                                let author_thumbnail = if config.proxy.use_channel_thumbnail_proxy {
-                                                    format!("{}channel_icon/{}", config.server.mainurl.trim_end_matches('/'), video_id)
-                                                } else {
-                                                    "".to_string()
-                                                };
+                        let author_thumbnail = if config.proxy.use_channel_thumbnail_proxy {
+                            format!("{}channel_icon/{}", config.server.mainurl.trim_end_matches('/'), channel_id)
+                        } else {
+                            "".to_string()
+                        };
                                                 
                                                 comments.push(Comment {
                                                     author,
@@ -669,7 +790,7 @@ pub async fn get_ytvideo_info(
                             .and_then(|c| c.as_str())
                             .map(|s| s.to_string()),
                         comments,
-                        channel_thumbnail: format!("{}channel_icon/{}", config.server.mainurl.trim_end_matches('/'), video_id),
+                        channel_thumbnail: format!("{}channel_icon/{}", config.server.mainurl.trim_end_matches('/'), channel_id),
                         thumbnail: format!("{}thumbnail/{}", config.server.mainurl.trim_end_matches('/'), video_id),
                         video_url: final_video_url_with_proxy,
                     };
@@ -834,7 +955,7 @@ pub async fn get_related_videos(
                                                                     .unwrap_or("Unknown Author")
                                                                     .to_string();
                                                                 
-                                                                let _channel_id = vinfo.get("channelId")
+                                                                let channel_id = vinfo.get("channelId")
                                                                     .and_then(|id| id.as_str())
                                                                     .unwrap_or("")
                                                                     .to_string();
@@ -846,11 +967,7 @@ pub async fn get_related_videos(
                                                                 
                                                                 let thumbnail = format!("{}thumbnail/{}", config.server.mainurl.trim_end_matches('/'), vid);
                                                                 
-                                                                let channel_thumbnail = if config.proxy.use_channel_thumbnail_proxy {
-                                                                    format!("{}channel_icon/{}", config.server.mainurl.trim_end_matches('/'), vid)
-                                                                } else {
-                                                                    "".to_string()
-                                                                };
+                                                                let channel_thumbnail = format!("{}channel_icon/{}", config.server.mainurl.trim_end_matches('/'), if channel_id.is_empty() { vid } else { channel_id.as_str() });
                                                                 
                                                                 let video_url = format!("{}get-ytvideo-info.php?video_id={}&quality={}", 
                                                                     config.server.mainurl, vid, config.video.default_quality);
@@ -939,4 +1056,292 @@ pub async fn get_related_videos(
     }
     
     HttpResponse::Ok().json(related_videos)
+}
+
+#[utoipa::path(
+    get,
+    path = "/get-direct-video-url.php",
+    params(
+        ("video_id" = String, Query, description = "YouTube video ID"),
+        ("quality" = Option<String>, Query, description = "Preferred quality")
+    ),
+    responses(
+        (status = 200, description = "Direct URL for the video", body = DirectUrlResponse),
+        (status = 400, description = "Missing video_id")
+    )
+)]
+pub async fn get_direct_video_url(
+    req: HttpRequest,
+    data: web::Data<crate::AppState>,
+) -> impl Responder {
+    let mut query_params: HashMap<String, String> = HashMap::new();
+    for pair in req.query_string().split('&') {
+        let mut parts = pair.split('=');
+        if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+            query_params.insert(key.to_string(), value.to_string());
+        }
+    }
+    
+    let video_id = match query_params.get("video_id") {
+        Some(id) => id.clone(),
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "ID параметр обязателен"
+            }));
+        }
+    };
+    
+    let quality = query_params.get("quality").map(|q| q.as_str());
+    match resolve_direct_stream_url(&video_id, quality, false, &data.config).await {
+        Some(url) => HttpResponse::Ok().json(DirectUrlResponse { video_url: url }),
+        None => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "Failed to resolve direct url"
+        })),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/direct_url",
+    params(
+        ("video_id" = String, Query, description = "YouTube video ID"),
+        ("quality" = Option<String>, Query, description = "Preferred quality"),
+        ("proxy" = Option<String>, Query, description = "Pass-through proxy (true/false)")
+    ),
+    responses(
+        (status = 200, description = "Video stream"),
+        (status = 400, description = "Missing video_id")
+    )
+)]
+pub async fn direct_url(
+    req: HttpRequest,
+    data: web::Data<crate::AppState>,
+) -> impl Responder {
+    let mut query_params: HashMap<String, String> = HashMap::new();
+    for pair in req.query_string().split('&') {
+        let mut parts = pair.split('=');
+        if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+            query_params.insert(key.to_string(), value.to_string());
+        }
+    }
+    
+    let video_id = match query_params.get("video_id") {
+        Some(id) => id.clone(),
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "ID параметр обязателен"
+            }));
+        }
+    };
+    
+    let quality = query_params.get("quality").map(|q| q.as_str());
+    let proxy_param = query_params.get("proxy").map(|p| p.to_lowercase()).unwrap_or_else(|| "true".to_string());
+    let use_proxy = proxy_param != "false";
+    
+    let direct_url = match resolve_direct_stream_url(&video_id, quality, false, &data.config).await {
+        Some(url) => url,
+        None => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to resolve video url"
+            }));
+        }
+    };
+    
+    if req.method() == actix_web::http::Method::HEAD {
+        let client = Client::new();
+        match client.head(&direct_url).send().await {
+            Ok(resp) => {
+                let mut builder = HttpResponse::build(resp.status());
+                if let Some(len) = resp.headers().get(CONTENT_LENGTH) {
+                    builder.insert_header((CONTENT_LENGTH, len.clone()));
+                }
+                if let Some(range) = resp.headers().get(CONTENT_RANGE) {
+                    builder.insert_header((CONTENT_RANGE, range.clone()));
+                }
+                builder.insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")));
+                builder.finish()
+            }
+            Err(_) => HttpResponse::Ok().finish(),
+        }
+    } else if !use_proxy {
+        HttpResponse::Found()
+            .insert_header((LOCATION, direct_url))
+            .finish()
+    } else {
+        proxy_stream_response(&direct_url, &req, "video/mp4").await
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/direct_audio_url",
+    params(
+        ("video_id" = String, Query, description = "YouTube video ID"),
+        ("proxy" = Option<String>, Query, description = "Pass-through proxy (true/false)")
+    ),
+    responses(
+        (status = 200, description = "Audio stream"),
+        (status = 400, description = "Missing video_id")
+    )
+)]
+pub async fn direct_audio_url(
+    req: HttpRequest,
+    data: web::Data<crate::AppState>,
+) -> impl Responder {
+    let mut query_params: HashMap<String, String> = HashMap::new();
+    for pair in req.query_string().split('&') {
+        let mut parts = pair.split('=');
+        if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+            query_params.insert(key.to_string(), value.to_string());
+        }
+    }
+    
+    let video_id = match query_params.get("video_id") {
+        Some(id) => id.clone(),
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "ID параметр обязателен"
+            }));
+        }
+    };
+    
+    let proxy_param = query_params.get("proxy").map(|p| p.to_lowercase()).unwrap_or_else(|| "true".to_string());
+    let use_proxy = proxy_param != "false";
+    
+    let direct_url = match resolve_direct_stream_url(&video_id, None, true, &data.config).await {
+        Some(url) => url,
+        None => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to resolve audio url"
+            }));
+        }
+    };
+    
+    if req.method() == actix_web::http::Method::HEAD {
+        let client = Client::new();
+        match client.head(&direct_url).send().await {
+            Ok(resp) => {
+                let mut builder = HttpResponse::build(resp.status());
+                if let Some(len) = resp.headers().get(CONTENT_LENGTH) {
+                    builder.insert_header((CONTENT_LENGTH, len.clone()));
+                }
+                if let Some(range) = resp.headers().get(CONTENT_RANGE) {
+                    builder.insert_header((CONTENT_RANGE, range.clone()));
+                }
+                builder.insert_header((CONTENT_TYPE, HeaderValue::from_static("audio/m4a")));
+                builder.finish()
+            }
+            Err(_) => HttpResponse::Ok().finish(),
+        }
+    } else if !use_proxy {
+        HttpResponse::Found()
+            .insert_header((LOCATION, direct_url))
+            .finish()
+    } else {
+        proxy_stream_response(&direct_url, &req, "audio/m4a").await
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/video.proxy",
+    params(
+        ("url" = String, Query, description = "Target URL to proxy")
+    ),
+    responses(
+        (status = 200, description = "Proxied response")
+    )
+)]
+pub async fn video_proxy(
+    req: HttpRequest,
+) -> impl Responder {
+    let mut query_params: HashMap<String, String> = HashMap::new();
+    for pair in req.query_string().split('&') {
+        let mut parts = pair.split('=');
+        if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+            query_params.insert(key.to_string(), value.to_string());
+        }
+    }
+    
+    let url = match query_params.get("url") {
+        Some(u) => {
+            urlencoding::decode(u).unwrap_or_else(|_| u.into()).to_string()
+        }
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Missing url parameter"
+            }));
+        }
+    };
+    
+    if req.method() == actix_web::http::Method::HEAD {
+        let client = Client::new();
+        match client.head(&url).send().await {
+            Ok(resp) => {
+                let mut builder = HttpResponse::build(resp.status());
+                if let Some(len) = resp.headers().get(CONTENT_LENGTH) {
+                    builder.insert_header((CONTENT_LENGTH, len.clone()));
+                }
+                if let Some(ct) = resp.headers().get(CONTENT_TYPE) {
+                    builder.insert_header((CONTENT_TYPE, ct.clone()));
+                }
+                builder.finish()
+            }
+            Err(_) => HttpResponse::Ok().finish(),
+        }
+    } else {
+        proxy_stream_response(&url, &req, "application/octet-stream").await
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/download",
+    params(
+        ("video_id" = String, Query, description = "YouTube video ID"),
+        ("quality" = Option<String>, Query, description = "Preferred quality")
+    ),
+    responses(
+        (status = 302, description = "Redirect to downloadable stream")
+    )
+)]
+pub async fn download_video(
+    req: HttpRequest,
+    data: web::Data<crate::AppState>,
+) -> impl Responder {
+    let mut query_params: HashMap<String, String> = HashMap::new();
+    for pair in req.query_string().split('&') {
+        let mut parts = pair.split('=');
+        if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+            query_params.insert(key.to_string(), value.to_string());
+        }
+    }
+    
+    let video_id = match query_params.get("video_id") {
+        Some(id) => id.clone(),
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "ID параметр обязателен"
+            }));
+        }
+    };
+    
+    let quality = query_params.get("quality").map(|q| q.as_str());
+    let direct_url = match resolve_direct_stream_url(&video_id, quality, false, &data.config).await {
+        Some(url) => url,
+        None => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to resolve video url"
+            }));
+        }
+    };
+    
+    if req.method() == actix_web::http::Method::HEAD {
+        HttpResponse::Ok().finish()
+    } else {
+        HttpResponse::Found()
+            .insert_header((LOCATION, direct_url))
+            .insert_header(("Content-Disposition", format!("attachment; filename=\"{}.mp4\"", video_id)))
+            .finish()
+    }
 }

@@ -2,11 +2,12 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::io::{self, Write};
+use tokio::io::AsyncWriteExt;
 
-pub fn perform_startup_checks() {
+pub async fn perform_startup_checks() {
     log::info!("Performing startup checks...");
     check_and_generate_config();
-    check_and_download_yt_dlp();
+    check_and_download_yt_dlp().await;
     log::info!("Startup checks completed.");
 }
 
@@ -64,7 +65,7 @@ cache:
     }
 }
 
-fn check_and_download_yt_dlp() {
+async fn check_and_download_yt_dlp() {
     let yt_dlp_exists = Command::new("yt-dlp")
         .arg("--version")
         .output()
@@ -77,8 +78,8 @@ fn check_and_download_yt_dlp() {
         return;
     }
     
-    log::error!("yt-dlp not found!");
-    print!("Would you like to download the latest version of yt-dlp from GitHub? (y/n): ");
+    log::error!("CHECK: yt-dlp not found!");
+    log::info!("Would you like to download the latest version of yt-dlp from GitHub? (y/n): ");
     io::stdout().flush().unwrap();
     
     let mut input = String::new();
@@ -87,10 +88,10 @@ fn check_and_download_yt_dlp() {
     if input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes" {
         log::info!("Downloading latest yt-dlp...");
         
-        match download_yt_dlp() {
+        match download_yt_dlp().await {
             Ok(_) => {
                 log::info!("yt-dlp downloaded successfully!");
-                log::info!("Please restart the application.");
+                log::info!("Please, reopen the server for changes to take effect.");
                 std::process::exit(0);
             },
             Err(e) => {
@@ -99,12 +100,12 @@ fn check_and_download_yt_dlp() {
             }
         }
     } else {
-        log::error!("yt-dlp is required to run this application. Exiting...");
+        log::error!("yt-dlp is required to run this server.");
         std::process::exit(1);
     }
 }
 
-fn download_yt_dlp() -> Result<(), Box<dyn std::error::Error>> {
+async fn download_yt_dlp() -> Result<(), Box<dyn std::error::Error>> {
     if !Path::new("assets").exists() {
         fs::create_dir("assets")?;
     }
@@ -115,7 +116,7 @@ fn download_yt_dlp() -> Result<(), Box<dyn std::error::Error>> {
         "yt-dlp"
     };
     
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::Client::new();
     
     let url = if cfg!(target_os = "windows") {
         "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
@@ -123,11 +124,13 @@ fn download_yt_dlp() -> Result<(), Box<dyn std::error::Error>> {
         "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
     };
     
-    let response = client.get(url).send()?;
-    let content = response.bytes()?;
+    let response = client.get(url).send().await?;
+    let content = response.bytes().await?;
     
     let file_path = format!("assets/{}", binary_name);
-    fs::write(&file_path, content)?;
+    
+    let mut file = tokio::fs::File::create(&file_path).await?;
+    file.write_all(&content).await?;
     
     #[cfg(unix)]
     {

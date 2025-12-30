@@ -22,11 +22,34 @@ use routes::auth::{AuthConfig, TokenStore};
         routes::auth::auth_events,
         routes::auth::oauth_callback,
         routes::auth::account_info,
+        routes::auth_routes::check_if_username_is_taken,
+        routes::auth_routes::link_device_token,
+        routes::auth_routes::get_session,
+        routes::auth_routes::client_login,
+        routes::auth_routes::youtube_client_login,
+        routes::auth_routes::oauth2_token,
+        routes::auth_routes::oauth2_userinfo,
         routes::search::get_top_videos,
         routes::search::get_search_videos,
         routes::search::get_search_suggestions,
+        routes::search::get_categories,
+        routes::search::get_categories_videos,
+        routes::search::get_playlist_videos,
+        routes::channel::get_author_videos,
+        routes::channel::get_author_videos_by_id,
+        routes::channel::get_channel_thumbnail_api,
         routes::video::get_ytvideo_info,
         routes::video::get_related_videos,
+        routes::video::direct_url,
+        routes::video::direct_audio_url,
+        routes::video::get_direct_video_url,
+        routes::video::video_proxy,
+        routes::video::download_video,
+        routes::additional::get_recommendations,
+        routes::additional::get_subscriptions,
+        routes::additional::get_history,
+        routes::additional::mark_video_watched,
+        routes::additional::get_instants,
     ),
     components(
         schemas(
@@ -34,12 +57,29 @@ use routes::auth::{AuthConfig, TokenStore};
             routes::auth::AccountInfoResponse,
             routes::auth::GoogleAccount,
             routes::auth::YouTubeChannel,
+            routes::auth_routes::IsUsernameTakeResult,
+            routes::auth_routes::OAuth2TokenResponse,
+            routes::auth_routes::OAuth2UserInfoResponse,
             routes::search::TopVideo,
             routes::search::SearchResult,
             routes::search::SearchSuggestions,
+            routes::search::CategoryItem,
+            routes::search::PlaylistInfo,
+            routes::search::PlaylistVideo,
+            routes::search::PlaylistResponse,
+            routes::channel::ChannelInfo,
+            routes::channel::ChannelVideo,
+            routes::channel::ChannelVideosResponse,
             routes::video::VideoInfoResponse,
             routes::video::Comment,
             routes::video::RelatedVideo,
+            routes::video::DirectUrlResponse,
+            routes::additional::RecommendationItem,
+            routes::additional::HistoryItem,
+            routes::additional::SubscriptionsResponse,
+            routes::additional::HistoryResponse,
+            routes::additional::InstantsResponse,
+            routes::additional::InstantItem,
         )
     ),
     tags(
@@ -90,13 +130,14 @@ async fn index(data: web::Data<AppState>) -> impl Responder {
 async fn main() -> std::io::Result<()> {
     log::init_logger();
     
-    check::perform_startup_checks();
+    check::perform_startup_checks().await;
     
     let config = Config::from_file("config.yml")
         .expect("Failed to load config.yml");
     
     let auth_config = AuthConfig {
         client_id: config.api.oauth_client_id.clone(),
+        client_secret: config.api.oauth_client_secret.clone(),
         redirect_uri: format!("http://localhost:{}/oauth/callback", config.server.port),
         scopes: vec![
             "https://www.googleapis.com/auth/youtube.readonly".to_string(),
@@ -133,13 +174,49 @@ async fn main() -> std::io::Result<()> {
             .route("/auth/events", web::get().to(routes::auth::auth_events))
             .route("/oauth/callback", web::get().to(routes::auth::oauth_callback))
             .route("/account_info", web::get().to(routes::auth::account_info))
+            .route("/check_if_username_is_taken", web::get().to(routes::auth_routes::check_if_username_is_taken))
+            .route("/link_device_token", web::post().to(routes::auth_routes::link_device_token))
+            .route("/get_session", web::post().to(routes::auth_routes::get_session))
+            .route("/accounts/ClientLogin", web::post().to(routes::auth_routes::client_login))
+            .route("/youtube/accounts/ClientLogin", web::post().to(routes::auth_routes::youtube_client_login))
+            .route("/o/oauth2/token", web::post().to(routes::auth_routes::oauth2_token))
+            .route("/oauth2/v1/userinfo", web::get().to(routes::auth_routes::oauth2_userinfo))
             .route("/get_top_videos.php", web::get().to(routes::search::get_top_videos))
             .route("/get_search_videos.php", web::get().to(routes::search::get_search_videos))
             .route("/get_search_suggestions.php", web::get().to(routes::search::get_search_suggestions))
+            .route("/get-categories.php", web::get().to(routes::search::get_categories))
+            .route("/get-categories_videos.php", web::get().to(routes::search::get_categories_videos))
+            .route("/playlist", web::get().to(routes::search::playlist_root))
+            .route("/playlist/{playlist_id}", web::get().to(routes::search::get_playlist_videos))
+            .route("/get_author_videos.php", web::get().to(routes::channel::get_author_videos))
+            .route("/get_author_videos_by_id.php", web::get().to(routes::channel::get_author_videos_by_id))
+            .route("/get_channel_thumbnail.php", web::get().to(routes::channel::get_channel_thumbnail_api))
             .route("/get-ytvideo-info.php", web::get().to(routes::video::get_ytvideo_info))
             .route("/get_related_videos.php", web::get().to(routes::video::get_related_videos))
+            .service(
+                web::resource("/direct_url")
+                    .route(web::get().to(routes::video::direct_url))
+                    .route(web::head().to(routes::video::direct_url))
+            )
+            .service(
+                web::resource("/direct_audio_url")
+                    .route(web::get().to(routes::video::direct_audio_url))
+                    .route(web::head().to(routes::video::direct_audio_url))
+            )
+            .route("/get-direct-video-url.php", web::get().to(routes::video::get_direct_video_url))
+            .service(
+                web::resource("/video.proxy")
+                    .route(web::get().to(routes::video::video_proxy))
+                    .route(web::head().to(routes::video::video_proxy))
+            )
+            .route("/download", web::get().to(routes::video::download_video))
             .route("/thumbnail/{video_id}", web::get().to(routes::video::thumbnail_proxy))
             .route("/channel_icon/{path_video_id}", web::get().to(routes::video::channel_icon))
+            .route("/get_recommendations.php", web::get().to(routes::additional::get_recommendations))
+            .route("/get_subscriptions.php", web::get().to(routes::additional::get_subscriptions))
+            .route("/get_history.php", web::get().to(routes::additional::get_history))
+            .route("/mark_video_watched.php", web::get().to(routes::additional::mark_video_watched))
+            .route("/get-instants", web::get().to(routes::additional::get_instants))
     })
     .bind(("0.0.0.0", port))?
     .run();
