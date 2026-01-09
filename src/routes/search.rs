@@ -603,7 +603,7 @@ pub async fn get_search_suggestions(
     }
 
     let query = match query_params.get("query") {
-        Some(q) => q,
+        Some(q) => &urlencoding::decode(q).unwrap_or(std::borrow::Cow::Borrowed(q)),
         None => {
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "error": "Query parameter is required"
@@ -1148,3 +1148,4 @@ pub async fn get_playlist_videos(
 
     HttpResponse::Ok().json(response)
 }
+
