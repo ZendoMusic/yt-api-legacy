@@ -22,11 +22,11 @@ You will need [Rust](https://rust-lang.org/tools/install/) installed on your sys
 3. If you don't have errors, your file will be compiled in `target/release`
 
 ### Deploying
-1. Download the latest version from the [releases page](https://github.com/ZendoMusic/yt-api-legacy/releases/).
-2. Go to `assets` folder and [download the latest yt_dlp binary](https://github.com/yt-dlp/yt-dlp/releases/) for your system
-3. Remove `.example` from `config.yml.example` file. If you don't have that file, download it from the repository
-4. Open `config.yml` and edit it to suit your needs
-5. Open the binary and enjoy.
+1. Download the latest version from the [releases page](https://github.com/ZendoMusic/yt-api-legacy/releases/) or the [GitHub Actions page](https://github.com/ZendoMusic/yt-api-legacy/actions).
+2. Go to the `assets` folder (create it if it doesn’t exist) and download the latest **yt-dlp** binary for your system from the [official releases page](https://github.com/yt-dlp/yt-dlp/releases/).
+3. Remove `.example` from the `config.yml.example` file. If you don't have this file, download it from the repository.
+4. Open `config.yml` and edit it to suit your needs.
+5. Run the binary and enjoy.
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](./LICENSE) file for details.
