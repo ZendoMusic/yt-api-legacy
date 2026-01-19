@@ -17,18 +17,24 @@ fn check_and_generate_config() {
 
         let default_config = r#"server:
   port: 2823
-  mainurl: ""
-  secretkey: "YOUR_SECRET_KEY"
+  main_url: ""
+  secret_key: ""
 
 api:
-  api_keys:
-    - "YOUR_YOUTUBE_API_KEY_1"
-    - "YOUR_YOUTUBE_API_KEY_2"
-  oauth_client_id: "YOUR_OAUTH_CLIENT_ID"
-  oauth_client_secret: "YOUR_OAUTH_CLIENT_SECRET"
   request_timeout: 30
+  keys:
+    active: []
+    disabled: []
+  innertube:
+    key: ""
+  oauth:
+    client_id: ""
+    client_secret: ""
+    redirect_uri: null
 
 video:
+  source: "direct"
+  use_cookies: true
   default_quality: "360"
   available_qualities:
     - "144"
@@ -39,21 +45,24 @@ video:
     - "1080"
     - "1440"
     - "2160"
-  video_source: "direct"
-  use_cookies: true
   default_count: 50
 
 proxy:
-  use_thumbnail_proxy: true
-  use_channel_thumbnail_proxy: false
-  use_video_proxy: true
-  fetch_channel_thumbnails: false
+  thumbnails:
+    video: true
+    channel: false
+    fetch_channel_thumbnails: false
+  video_proxy: true
 
 cache:
   temp_folder_max_size_mb: 5120
-  cache_cleanup_threshold_mb: 100
+  cleanup_threshold_mb: 100
 
-instants: []"#;
+instances:
+  - "https://yt.legacyprojects.ru"
+  - "https://yt.modyleprojects.ru"
+  - "https://ytcloud.meetlook.ru"
+"#;
 
         if let Err(e) = fs::write("config.yml", default_config) {
             log::error!("Failed to create default config.yml: {}", e);

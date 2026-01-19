@@ -1,44 +1,43 @@
-server:
+﻿server:
   port: 2823
-  mainurl: "http://localhost:2823/" #main url of the server
-  secretkey: "test" # secret key for encrypting and decrypting
-  frontend_url: "http://localhost:3000" # soon will be removed
+  # public URL of the server (optional)
+  main_url: ""
+  # used for internal signing / sessions
+  secret_key: ""
 
 api:
-  api_keys:
-    - "add api keys here which you like to use"
-  dontworkedkeys: []
-  oauth_client_id: "" # google oauth client id - go to https://console.developers.google.com/apis/credentials
-  innertube_key: ""
-  oauth_client_secret: "" # google oauth client secret - go to https://console.developers.google.com/apis/credentials
-  request_timeout: 30
+  request_timeout: 30 # in seconds
+  # add api keys here which you like to use
+  keys:
+    active: []
+    disabled: []
+  innertube:
+    key: ""
+  # google oauth - https://console.developers.google.com/apis/credentials
+  oauth:
+    client_id: ""
+    client_secret: ""
+    redirect_uri: null
 
 video:
-  default_quality: "360"
-  available_qualities:
-    - "144"
-    - "240"
-    - "360"
-    - "480"
-    - "720"
-    - "1080"
-    - "1440"
-    - "2160"
-  video_source: "direct"
+  source: "direct"
   use_cookies: true
+  default_quality: "360"
+  available_qualities: [144, 240, 360, 480, 720, 1080, 1440, 2160]
   default_count: 50
 
 proxy:
-  use_thumbnail_proxy: true
-  use_channel_thumbnail_proxy: false
-  use_video_proxy: true
-  fetch_channel_thumbnails: false
+  thumbnails:
+    video: true
+    channel: false
+    fetch_channel_thumbnails: false
+  video_proxy: true
 
 cache:
   temp_folder_max_size_mb: 5120
-  cache_cleanup_threshold_mb: 100
+  cleanup_threshold_mb: 100
 
-instants:
-  - url: "https://yt.legacyprojects.ru"
-  - url: "https://yt.modyleprojects.ru"
-  - url: "https://ytcloud.meetlook.ru"
+instances:
+  - "https://yt.legacyprojects.ru"
+  - "https://yt.modyleprojects.ru"
+  - "https://ytcloud.meetlook.ru"

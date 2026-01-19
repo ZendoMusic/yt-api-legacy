@@ -1,13 +1,15 @@
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
+use html_escape::decode_html_entities;
 use reqwest::Client;
 use serde::Serialize;
 use serde_json;
 use std::collections::HashMap;
+use urlencoding;
 use utoipa::ToSchema;
 
 fn base_url(req: &HttpRequest, config: &crate::config::Config) -> String {
-    if !config.server.mainurl.is_empty() {
-        return config.server.mainurl.clone();
+    if !config.server.main_url.is_empty() {
+        return config.server.main_url.clone();
     }
     let info = req.connection_info();
     let scheme = info.scheme();
@@ -39,6 +41,20 @@ fn parse_iso_duration(iso: &str) -> String {
     } else {
         format!("{}:{:02}", minutes, seconds)
     }
+}
+
+fn decode_label(value: &str) -> String {
+    let decoded = urlencoding::decode(value)
+        .unwrap_or_else(|_| value.into())
+        .to_string();
+    let decoded = decode_html_entities(&decoded).to_string();
+    decoded
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
 }
 #[derive(Serialize, ToSchema)]
 pub struct TopVideo {
@@ -104,7 +120,7 @@ async fn get_channel_thumbnail(
     api_key: &str,
     config: &crate::config::Config,
 ) -> String {
-    if !config.proxy.fetch_channel_thumbnails {
+    if !config.proxy.thumbnails.fetch_channel_thumbnails {
         return "https://yt3.googleusercontent.com/a/default-user=s88-c-k-c0x00ffffff-no-rj"
             .to_string();
     }
@@ -204,8 +220,8 @@ pub async fn get_top_videos(req: HttpRequest, data: web::Data<crate::AppState>) 
                             let title = video_info
                                 .get("title")
                                 .and_then(|t| t.as_str())
-                                .unwrap_or("Unknown Title")
-                                .to_string();
+                                .unwrap_or("Unknown Title");
+                            let title = decode_label(title);
 
                             let author = video_info
                                 .get("channelTitle")
@@ -385,8 +401,8 @@ pub async fn get_search_videos(
                             let title = item_info
                                 .get("title")
                                 .and_then(|t| t.as_str())
-                                .unwrap_or("Unknown Title")
-                                .to_string();
+                                .unwrap_or("Unknown Title");
+                            let title = decode_label(title);
 
                             let author = item_info
                                 .get("channelTitle")
@@ -718,8 +734,8 @@ pub async fn get_categories(req: HttpRequest, data: web::Data<crate::AppState>) 
                             let title = snippet
                                 .get("title")
                                 .and_then(|t| t.as_str())
-                                .unwrap_or("")
-                                .to_string();
+                                .unwrap_or("");
+                            let title = decode_label(title);
 
                             categories.push(CategoryItem {
                                 id: id.to_string(),
@@ -806,8 +822,8 @@ pub async fn get_categories_videos(
                             let title = video_info
                                 .get("title")
                                 .and_then(|t| t.as_str())
-                                .unwrap_or("Unknown Title")
-                                .to_string();
+                                .unwrap_or("Unknown Title");
+                            let title = decode_label(title);
 
                             let author = video_info
                                 .get("channelTitle")
@@ -1032,8 +1048,8 @@ pub async fn get_playlist_videos(
                         let title = snippet
                             .get("title")
                             .and_then(|t| t.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                            .unwrap_or("");
+                        let title = decode_label(title);
 
                         let author = channel_info
                             .and_then(|c| c.get("snippet"))
@@ -1148,4 +1164,3 @@ pub async fn get_playlist_videos(
 
     HttpResponse::Ok().json(response)
 }
-

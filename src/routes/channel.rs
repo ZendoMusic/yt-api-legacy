@@ -6,8 +6,8 @@ use urlencoding;
 use utoipa::ToSchema;
 
 fn base_url(req: &HttpRequest, config: &crate::config::Config) -> String {
-    if !config.server.mainurl.is_empty() {
-        return config.server.mainurl.clone();
+    if !config.server.main_url.is_empty() {
+        return config.server.main_url.clone();
     }
     let info = req.connection_info();
     let scheme = info.scheme();

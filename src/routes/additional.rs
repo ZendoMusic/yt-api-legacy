@@ -1,7 +1,7 @@
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
-use reqwest::Client;
-use regex::Regex;
 use html_escape::decode_html_entities;
+use regex::Regex;
+use reqwest::Client;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use utoipa::ToSchema;
@@ -12,8 +12,8 @@ use crate::routes::auth::AuthConfig;
 use crate::routes::oauth::refresh_access_token;
 use std::fs;
 fn base_url(req: &HttpRequest, config: &crate::config::Config) -> String {
-    if !config.server.mainurl.is_empty() {
-        return config.server.mainurl.clone();
+    if !config.server.main_url.is_empty() {
+        return config.server.main_url.clone();
     }
     let info = req.connection_info();
     let scheme = info.scheme();
@@ -42,8 +42,7 @@ fn clean_text(input: &str) -> String {
 }
 
 fn generate_cpn() -> String {
-    const CHARSET: &[u8] =
-        b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let bytes = Uuid::new_v4().into_bytes();
     let mut out = String::with_capacity(16);
     for b in bytes.iter().take(16) {
@@ -67,12 +66,6 @@ async fn is_key_valid(client: &Client, key: &str) -> bool {
     matches!(client.get(&url).send().await, Ok(resp) if resp.status().is_success())
 }
 
-fn persist_config(path: &str, config: &Config) -> Result<(), String> {
-    serde_yaml::to_string(config)
-        .map_err(|e| format!("Failed to serialize config: {}", e))
-        .and_then(|yaml| fs::write(path, yaml).map_err(|e| format!("Failed to write config: {}", e)))
-}
-
 #[utoipa::path(
     get,
     path = "/check_api_keys",
@@ -91,7 +84,7 @@ pub async fn check_api_keys() -> impl Responder {
         }
     };
 
-    if config.api.api_keys.is_empty() {
+    if config.api.keys.active.is_empty() {
         return HttpResponse::Ok().json(serde_json::json!({
             "checked": 0,
             "failed": [],
@@ -100,7 +93,7 @@ pub async fn check_api_keys() -> impl Responder {
     }
 
     let client = Client::new();
-    let original_keys = config.api.api_keys.clone();
+    let original_keys = config.api.keys.active.clone();
     let mut working_keys: Vec<String> = Vec::with_capacity(original_keys.len());
     let mut failed_keys: Vec<String> = Vec::new();
     let mut failed_set: HashSet<String> = HashSet::new();
@@ -122,15 +115,21 @@ pub async fn check_api_keys() -> impl Responder {
     }
 
     let checked = original_keys.len();
-    config.api.api_keys = working_keys;
+    config.api.keys.active = working_keys;
 
     for failed in failed_keys.iter() {
-        if !config.api.dontworkedkeys.iter().any(|existing| existing == failed) {
-            config.api.dontworkedkeys.push(failed.clone());
+        if !config
+            .api
+            .keys
+            .disabled
+            .iter()
+            .any(|existing| existing == failed)
+        {
+            config.api.keys.disabled.push(failed.clone());
         }
     }
 
-    if let Err(e) = persist_config(path, &config) {
+    if let Err(e) = config.persist(path) {
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": e
         }));
@@ -141,7 +140,7 @@ pub async fn check_api_keys() -> impl Responder {
     HttpResponse::Ok().json(serde_json::json!({
         "checked": checked,
         "failed": masked_failed,
-        "active": config.api.api_keys.len()
+        "active": config.api.keys.active.len()
     }))
 }
 
@@ -163,7 +162,7 @@ pub async fn check_failed_api_keys() -> impl Responder {
         }
     };
 
-    if config.api.dontworkedkeys.is_empty() {
+    if config.api.keys.disabled.is_empty() {
         return HttpResponse::Ok().json(serde_json::json!({
             "checked": 0,
             "message": "No non-working api_keys configured"
@@ -174,7 +173,7 @@ pub async fn check_failed_api_keys() -> impl Responder {
     let mut revived_keys: Vec<String> = Vec::new();
     let mut still_failed_keys: Vec<String> = Vec::new();
 
-    for key in config.api.dontworkedkeys.iter() {
+    for key in config.api.keys.disabled.iter() {
         let normalized = key.trim().to_string();
 
         if normalized.is_empty() {
@@ -189,17 +188,17 @@ pub async fn check_failed_api_keys() -> impl Responder {
         }
     }
 
-    let mut active_keys = config.api.api_keys.clone();
+    let mut active_keys = config.api.keys.active.clone();
     for revived in revived_keys.iter() {
         if !active_keys.iter().any(|existing| existing == revived) {
             active_keys.push(revived.clone());
         }
     }
 
-    config.api.api_keys = active_keys;
-    config.api.dontworkedkeys = still_failed_keys.clone();
+    config.api.keys.active = active_keys;
+    config.api.keys.disabled = still_failed_keys.clone();
 
-    if let Err(e) = persist_config(path, &config) {
+    if let Err(e) = config.persist(path) {
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": e
         }));
@@ -209,7 +208,7 @@ pub async fn check_failed_api_keys() -> impl Responder {
         "checked": revived_keys.len() + still_failed_keys.len(),
         "revived": revived_keys.iter().map(|k| mask_key(k)).collect::<Vec<_>>(),
         "still_failed": still_failed_keys.iter().map(|k| mask_key(k)).collect::<Vec<_>>(),
-        "active": config.api.api_keys.len()
+        "active": config.api.keys.active.len()
     }))
 }
 
@@ -650,10 +649,7 @@ pub async fn get_recommendations(
         }
     };
 
-    let url = format!(
-        "https://www.youtube.com/youtubei/v1/browse?key={}",
-        api_key
-    );
+    let url = format!("https://www.youtube.com/youtubei/v1/browse?key={}", api_key);
 
     let res = client
         .post(&url)
@@ -1144,7 +1140,7 @@ pub async fn get_instants(data: web::Data<crate::AppState>) -> impl Responder {
     let response = InstantsResponse {
         instants: instants
             .into_iter()
-            .map(|i| InstantItem { url: i.url })
+            .map(|i| InstantItem { url: i.0 })
             .collect(),
     };
 

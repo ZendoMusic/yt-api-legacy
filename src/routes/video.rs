@@ -2,11 +2,11 @@ use actix_web::http::header::{HeaderValue, CONTENT_LENGTH, CONTENT_RANGE, CONTEN
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use chrono::DateTime;
 use futures_util::StreamExt;
+use html_escape::decode_html_entities;
 use image::{GenericImageView, Pixel};
 use lazy_static::lazy_static;
 use lru::LruCache;
 use reqwest::Client;
-use html_escape::decode_html_entities;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
@@ -20,8 +20,8 @@ use urlencoding;
 use utoipa::ToSchema;
 
 fn base_url(req: &HttpRequest, config: &crate::config::Config) -> String {
-    if !config.server.mainurl.is_empty() {
-        return config.server.mainurl.clone();
+    if !config.server.main_url.is_empty() {
+        return config.server.main_url.clone();
     }
     let info = req.connection_info();
     let scheme = info.scheme();
@@ -850,7 +850,7 @@ pub async fn get_ytvideo_info(
                     }
                 }
 
-                let final_video_url = if config.video.video_source == "direct" {
+                let final_video_url = if config.video.source == "direct" {
                     format!(
                         "{}/direct_url?video_id={}&quality={}",
                         base_trimmed, video_id, quality
@@ -860,7 +860,7 @@ pub async fn get_ytvideo_info(
                 };
 
                 let final_video_url_with_proxy =
-                    if config.proxy.use_video_proxy && !final_video_url.is_empty() {
+                    if config.proxy.video_proxy && !final_video_url.is_empty() {
                         format!(
                             "{}/video.proxy?url={}",
                             base_trimmed,
@@ -1223,8 +1223,7 @@ pub async fn get_related_videos(
                                                                     base_trimmed, vid, quality);
 
                                                                 let final_url =
-                                                                    if config.proxy.use_video_proxy
-                                                                    {
+                                                                    if config.proxy.video_proxy {
                                                                         format!(
                                                                             "{}/video.proxy?url={}",
                                                                             base_trimmed,

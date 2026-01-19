@@ -134,11 +134,10 @@ async fn index(data: web::Data<AppState>) -> impl Responder {
 
     let html_content = html_content.replace("<!--PORT-->", &port.to_string());
 
-    HttpResponse::Ok()
+        HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
         .body(html_content)
 }
-
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     log::init_logger();
@@ -147,26 +146,26 @@ async fn main() -> std::io::Result<()> {
 
     let config = Config::from_file("config.yml").expect("Failed to load config.yml");
 
-    let redirect_base = if let Some(custom) = config.api.redirect_uri.clone() {
+    let redirect_base = if let Some(custom) = config.api.oauth.redirect_uri.clone() {
         custom.trim_end_matches('/').to_string()
-    } else if !config.server.mainurl.is_empty() {
-        config.server.mainurl.trim_end_matches('/').to_string()
+    } else if !config.server.main_url.is_empty() {
+        config.server.main_url.trim_end_matches('/').to_string()
     } else if let Some(first) = config.instants.first() {
-        first.url.trim_end_matches('/').to_string()
+        first.0.trim_end_matches('/').to_string()
     } else {
         format!("http://localhost:{}", config.server.port)
     };
 
-    let youtube_api_key = if !config.api.api_keys.is_empty() {
-        config.api.api_keys[0].clone()
+    let youtube_api_key = if !config.api.keys.active.is_empty() {
+        config.api.keys.active[0].clone()
     } else {
         String::new()
     };
-    
+
     let auth_config = AuthConfig {
-        client_id: config.api.oauth_client_id.clone(),
-        client_secret: config.api.oauth_client_secret.clone(),
-        redirect_uri: if config.api.redirect_uri.is_some() {
+        client_id: config.api.oauth.client_id.clone(),
+        client_secret: config.api.oauth.client_secret.clone(),
+        redirect_uri: if config.api.oauth.redirect_uri.is_some() {
             redirect_base.clone()
         } else {
             format!("{}/oauth/callback", redirect_base)
