@@ -260,6 +260,12 @@ impl Config {
             .map(|s| s.as_str())
             .filter(|k| !k.is_empty() && !bad.contains(k))
             .collect();
+        
+        // Handle case when no API keys are configured
+        if good_keys.is_empty() {
+            return "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"; // Default YouTube API key
+        }
+        
         let index = API_KEY_COUNTER.fetch_add(1, Ordering::Relaxed) % good_keys.len();
         good_keys[index]
     }

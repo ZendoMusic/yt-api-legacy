@@ -17,6 +17,97 @@ fn base_url(req: &HttpRequest, config: &crate::config::Config) -> String {
     format!("{}://{}/", scheme, host.trim_end_matches('/'))
 }
 
+fn simplify_text(node: &serde_json::Value) -> String {
+    if node.is_null() {
+        return String::new();
+    }
+    if let Some(s) = node.as_str() {
+        return s.to_string();
+    }
+    if let Some(simple_text) = node.get("simpleText").and_then(|t| t.as_str()) {
+        return simple_text.to_string();
+    }
+    if let Some(runs) = node.get("runs").and_then(|r| r.as_array()) {
+        return runs
+            .iter()
+            .filter_map(|run| run.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("");
+    }
+    String::new()
+}
+
+fn find_video_renderers(obj: &serde_json::Value, out: &mut Vec<serde_json::Value>) {
+    if let Some(obj_map) = obj.as_object() {
+        if obj_map.contains_key("videoRenderer") {
+            out.push(obj_map["videoRenderer"].clone());
+        } else {
+            for value in obj_map.values() {
+                find_video_renderers(value, out);
+            }
+        }
+    } else if let Some(arr) = obj.as_array() {
+        for item in arr {
+            find_video_renderers(item, out);
+        }
+    }
+}
+
+fn parse_video_renderer(vr: &serde_json::Value, base_trimmed: &str) -> Option<SearchResult> {
+    let video_id = vr.get("videoId").and_then(|v| v.as_str())?.to_string();
+    
+    // Extract channel ID from ownerText
+    let mut channel_id = String::new();
+    if let Some(owner_runs) = vr
+        .get("ownerText")
+        .and_then(|o| o.get("runs"))
+        .and_then(|r| r.as_array())
+    {
+        if !owner_runs.is_empty() {
+            if let Some(endpoint) = owner_runs[0].get("navigationEndpoint") {
+                if let Some(browse_endpoint) = endpoint.get("browseEndpoint") {
+                    channel_id = browse_endpoint
+                        .get("browseId")
+                        .and_then(|b| b.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                }
+            }
+        }
+    }
+    
+    // Fallback channel ID extraction
+    if channel_id.is_empty() {
+        channel_id = vr
+            .get("channelId")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+    }
+    
+    let title = simplify_text(&vr.get("title").unwrap_or(&serde_json::Value::Null));
+    let author = simplify_text(&vr.get("ownerText").unwrap_or(&serde_json::Value::Null));
+    let duration = simplify_text(&vr.get("lengthText").unwrap_or(&serde_json::Value::Null));
+    
+    let thumbnail = format!("{}/thumbnail/{}", base_trimmed, video_id);
+    let channel_thumbnail = if !channel_id.is_empty() {
+        format!("{}/channel_icon/{}", base_trimmed, channel_id)
+    } else {
+        format!("{}/channel_icon/{}", base_trimmed, video_id)
+    };
+    
+    Some(SearchResult {
+        title: decode_label(&title),
+        author: decode_label(&author),
+        video_id: Some(video_id),
+        channel_id: if !channel_id.is_empty() { Some(channel_id) } else { None },
+        playlist_id: None,
+        thumbnail,
+        channel_thumbnail,
+        duration: if !duration.is_empty() { Some(duration) } else { None },
+    })
+}
+
 fn parse_iso_duration(iso: &str) -> String {
     let mut hours = 0;
     let mut minutes = 0;
@@ -115,52 +206,7 @@ pub struct PlaylistResponse {
     pub videos: Vec<PlaylistVideo>,
 }
 
-async fn get_channel_thumbnail(
-    channel_id: &str,
-    api_key: &str,
-    config: &crate::config::Config,
-) -> String {
-    if !config.proxy.thumbnails.fetch_channel_thumbnails {
-        return "https://yt3.googleusercontent.com/a/default-user=s88-c-k-c0x00ffffff-no-rj"
-            .to_string();
-    }
-
-    let client = Client::new();
-    let url = format!(
-        "https://www.googleapis.com/youtube/v3/channels?id={}&key={}&part=snippet",
-        channel_id, api_key
-    );
-
-    match client.get(&url).send().await {
-        Ok(response) => match response.json::<serde_json::Value>().await {
-            Ok(data) => {
-                if let Some(items) = data.get("items").and_then(|i| i.as_array()) {
-                    if !items.is_empty() {
-                        if let Some(thumbnail_url) = items[0]
-                            .get("snippet")
-                            .and_then(|s| s.get("thumbnails"))
-                            .and_then(|t| t.get("default"))
-                            .and_then(|d| d.get("url"))
-                            .and_then(|u| u.as_str())
-                        {
-                            return thumbnail_url.replace(
-                                "https://yt3.ggpht.com",
-                                "https://yt3.googleusercontent.com",
-                            );
-                        }
-                    }
-                }
-                "https://yt3.googleusercontent.com/a/default-user=s88-c-k-c0x00ffffff-no-rj"
-                    .to_string()
-            }
-            Err(_) => "https://yt3.googleusercontent.com/a/default-user=s88-c-k-c0x00ffffff-no-rj"
-                .to_string(),
-        },
-        Err(_) => {
-            "https://yt3.googleusercontent.com/a/default-user=s88-c-k-c0x00ffffff-no-rj".to_string()
-        }
-    }
-}
+// Removed get_channel_thumbnail function as we now generate channel thumbnails locally
 
 #[utoipa::path(
     get,
@@ -295,6 +341,7 @@ pub async fn get_search_videos(
 ) -> impl Responder {
     let config = &data.config;
     let base = base_url(&req, config);
+    let base_trimmed = base.trim_end_matches('/');
 
     let mut query_params: HashMap<String, String> = HashMap::new();
     for pair in req.query_string().split('&') {
@@ -313,10 +360,10 @@ pub async fn get_search_videos(
         }
     };
 
-    let count: i32 = query_params
+    let count: usize = query_params
         .get("count")
         .and_then(|c| c.parse().ok())
-        .unwrap_or(config.video.default_count as i32);
+        .unwrap_or(config.video.default_count as usize);
 
     let search_type = query_params
         .get("type")
@@ -330,265 +377,69 @@ pub async fn get_search_videos(
         }));
     }
 
-    let apikey = config.get_api_key_rotated();
+    // Use InnerTube API key from config
+    let innertube_key = match config.get_innertube_key() {
+        Some(key) => key,
+        None => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Missing innertube_key in config.yml"
+            }));
+        }
+    };
+
     let client = Client::new();
+    
+    // InnerTube search payload
+    let payload = serde_json::json!({
+        "context": {
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": "2.20240101.00.00", // Generic version
+            }
+        },
+        "query": query
+    });
 
     let url = format!(
-        "https://www.googleapis.com/youtube/v3/search?part=snippet&q={}&maxResults={}&type={}&key={}",
-        query,
-        count,
-        search_type,
-        apikey
+        "https://www.youtube.com/youtubei/v1/search?key={}",
+        innertube_key
     );
 
-    match client.get(&url).send().await {
+    match client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+    {
         Ok(response) => match response.json::<serde_json::Value>().await {
             Ok(json_data) => {
                 let mut search_results: Vec<SearchResult> = Vec::new();
-                let mut video_ids: Vec<String> = Vec::new();
-
-                if let Some(items) = json_data.get("items").and_then(|i| i.as_array()) {
-                    for item in items {
-                        if search_type == "video" {
-                            if let Some(vid) = item
-                                .get("id")
-                                .and_then(|id| id.get("videoId"))
-                                .and_then(|v| v.as_str())
-                            {
-                                video_ids.push(vid.to_string());
-                            }
-                        }
-                    }
-                }
-
-                let mut durations: HashMap<String, String> = HashMap::new();
-                if !video_ids.is_empty() {
-                    let details_url = format!(
-                            "https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id={}&key={}",
-                            video_ids.join(","),
-                            apikey
-                        );
-                    if let Ok(details_resp) = client.get(&details_url).send().await {
-                        if let Ok(details_json) = details_resp.json::<serde_json::Value>().await {
-                            if let Some(items) =
-                                details_json.get("items").and_then(|i| i.as_array())
-                            {
-                                for item in items {
-                                    if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
-                                        let iso = item
-                                            .get("contentDetails")
-                                            .and_then(|c| c.get("duration"))
-                                            .and_then(|d| d.as_str())
-                                            .unwrap_or("");
-                                        durations.insert(id.to_string(), parse_iso_duration(iso));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if let Some(items) = json_data.get("items").and_then(|i| i.as_array()) {
-                    for (_index, item) in items.iter().enumerate() {
-                        if let Some(item_id) = item.get("id") {
-                            let item_info = match item.get("snippet") {
-                                Some(info) => info,
-                                None => {
-                                    continue;
-                                }
-                            };
-
-                            let title = item_info
-                                .get("title")
-                                .and_then(|t| t.as_str())
-                                .unwrap_or("Unknown Title");
-                            let title = decode_label(title);
-
-                            let author = item_info
-                                .get("channelTitle")
-                                .and_then(|a| a.as_str())
-                                .unwrap_or("Unknown Author")
-                                .to_string();
-
-                            let channel_id = item_info
-                                .get("channelId")
-                                .and_then(|id| id.as_str())
-                                .map(|id| id.to_string());
-
-                            let result = match search_type {
-                                "video" => {
-                                    let video_id = item_id
-                                        .get("videoId")
-                                        .and_then(|id| id.as_str())
-                                        .map(|id| id.to_string());
-
-                                    if video_id.is_none() {
-                                        continue;
-                                    }
-
-                                    let thumbnail = format!(
-                                        "{}/thumbnail/{}",
-                                        base.trim_end_matches('/'),
-                                        video_id.as_ref().unwrap()
-                                    );
-                                    let channel_thumbnail = channel_id
-                                        .as_ref()
-                                        .map(|c| {
-                                            format!(
-                                                "{}/channel_icon/{}",
-                                                base.trim_end_matches('/'),
-                                                c
-                                            )
-                                        })
-                                        .unwrap_or_else(|| {
-                                            format!(
-                                                "{}/channel_icon/{}",
-                                                base.trim_end_matches('/'),
-                                                video_id.as_ref().unwrap()
-                                            )
-                                        });
-
-                                    let duration =
-                                        video_id.as_ref().and_then(|id| durations.get(id)).cloned();
-
-                                    SearchResult {
-                                        title,
-                                        author,
-                                        video_id,
-                                        channel_id,
-                                        playlist_id: None,
-                                        thumbnail,
-                                        channel_thumbnail,
-                                        duration,
-                                    }
-                                }
-                                "channel" => {
-                                    let channel_id = item_id
-                                        .get("channelId")
-                                        .and_then(|id| id.as_str())
-                                        .map(|id| id.to_string());
-
-                                    if channel_id.is_none() {
-                                        continue;
-                                    }
-
-                                    let thumbnail = item_info
-                                        .get("thumbnails")
-                                        .and_then(|thumbs| thumbs.get("high"))
-                                        .and_then(|high| high.get("url"))
-                                        .and_then(|url| url.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-
-                                    let channel_thumbnail = format!(
-                                        "{}/channel_icon/{}",
-                                        base.trim_end_matches('/'),
-                                        channel_id.as_ref().unwrap()
-                                    );
-
-                                    SearchResult {
-                                        title,
-                                        author,
-                                        video_id: None,
-                                        channel_id,
-                                        playlist_id: None,
-                                        thumbnail,
-                                        channel_thumbnail,
-                                        duration: None,
-                                    }
-                                }
-                                "playlist" => {
-                                    let playlist_id = item_id
-                                        .get("playlistId")
-                                        .and_then(|id| id.as_str())
-                                        .map(|id| id.to_string());
-
-                                    if playlist_id.is_none() {
-                                        continue;
-                                    }
-
-                                    let mut video_id = String::new();
-                                    if let Some(thumbnail_url) = item_info
-                                        .get("thumbnails")
-                                        .and_then(|thumbs| thumbs.get("high"))
-                                        .and_then(|high| high.get("url"))
-                                        .and_then(|url| url.as_str())
-                                    {
-                                        if thumbnail_url.contains("i.ytimg.com/vi/") {
-                                            if let Some(start) =
-                                                thumbnail_url.find("i.ytimg.com/vi/")
-                                            {
-                                                let start_pos = start + 16;
-                                                if let Some(end_pos) =
-                                                    thumbnail_url[start_pos..].find('/')
-                                                {
-                                                    video_id = thumbnail_url
-                                                        [start_pos..start_pos + end_pos]
-                                                        .to_string();
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    let thumbnail = if !video_id.is_empty() {
-                                        format!(
-                                            "{}/thumbnail/{}",
-                                            base.trim_end_matches('/'),
-                                            video_id
-                                        )
-                                    } else {
-                                        item_info
-                                            .get("thumbnails")
-                                            .and_then(|thumbs| thumbs.get("high"))
-                                            .and_then(|high| high.get("url"))
-                                            .and_then(|url| url.as_str())
-                                            .unwrap_or("")
-                                            .to_string()
-                                    };
-
-                                    let channel_thumbnail = channel_id
-                                        .as_ref()
-                                        .map(|c| {
-                                            format!(
-                                                "{}/channel_icon/{}",
-                                                base.trim_end_matches('/'),
-                                                c
-                                            )
-                                        })
-                                        .unwrap_or_default();
-
-                                    SearchResult {
-                                        title,
-                                        author,
-                                        video_id: None,
-                                        channel_id,
-                                        playlist_id,
-                                        thumbnail,
-                                        channel_thumbnail,
-                                        duration: None,
-                                    }
-                                }
-                                _ => continue,
-                            };
-
-                            search_results.push(result);
-                        }
+                
+                // Extract video renderers from the response
+                let mut video_renderers = Vec::new();
+                find_video_renderers(&json_data, &mut video_renderers);
+                
+                // Parse video results
+                for vr in video_renderers.iter().take(count) {
+                    if let Some(result) = parse_video_renderer(vr, base_trimmed) {
+                        search_results.push(result);
                     }
                 }
 
                 HttpResponse::Ok().json(search_results)
             }
             Err(e) => {
-                crate::log::info!("Error parsing YouTube API response: {}", e);
+                crate::log::info!("Error parsing InnerTube response: {}", e);
                 HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Failed to parse YouTube API response"
+                    "error": "Failed to parse InnerTube response"
                 }))
             }
         },
         Err(e) => {
-            crate::log::info!("Error calling YouTube API: {}", e);
+            crate::log::info!("Error calling InnerTube API: {}", e);
             HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to call YouTube API"
+                "error": "Failed to call InnerTube API"
             }))
         }
     }

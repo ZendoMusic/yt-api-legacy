@@ -1,6 +1,5 @@
 use actix_web::http::header::{HeaderValue, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, LOCATION};
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
-use chrono::DateTime;
 use futures_util::StreamExt;
 use html_escape::decode_html_entities;
 use image::{GenericImageView, Pixel};
@@ -27,6 +26,373 @@ fn base_url(req: &HttpRequest, config: &crate::config::Config) -> String {
     let scheme = info.scheme();
     let host = info.host();
     format!("{}://{}/", scheme, host.trim_end_matches('/'))
+}
+
+fn extract_ytcfg(html: &str) -> serde_json::Value {
+    if let Some(cap) = regex::Regex::new(r"ytcfg\.set\((\{.*?\})\);")
+        .unwrap()
+        .captures(html)
+    {
+        if let Ok(cfg) = serde_json::from_str(&cap[1]) {
+            return cfg;
+        }
+    }
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+fn extract_initial_player_response(html: &str) -> serde_json::Value {
+    // Try multiple patterns like in the Python script
+    let patterns = [
+        r"ytInitialPlayerResponse\s*=\s*(\{.+?\});",
+        r"window\['ytInitialPlayerResponse'\]\s*=\s*(\{.+?\});",
+    ];
+    
+    for pattern in &patterns {
+        if let Some(cap) = regex::Regex::new(pattern)
+            .unwrap()
+            .captures(html)
+        {
+            if let Ok(pr) = serde_json::from_str(&cap[1]) {
+                return pr;
+            }
+        }
+    }
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+fn get_comments_token(data: &serde_json::Value) -> Option<String> {
+    // Try to find the comment section and extract continuation token
+    // This mimics the Python logic
+    if let Some(contents) = data
+        .get("contents")
+        .and_then(|c| c.get("twoColumnWatchNextResults"))
+        .and_then(|c| c.get("results"))
+        .and_then(|r| r.get("results"))
+        .and_then(|r| r.get("contents"))
+        .and_then(|c| c.as_array())
+    {
+        for item in contents {
+            if let Some(item_section) = item.get("itemSectionRenderer") {
+                // Check if this is the comment section
+                if item_section
+                    .get("sectionIdentifier")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s == "comment-item-section")
+                    .unwrap_or(false)
+                {
+                    if let Some(section_contents) = item_section
+                        .get("contents")
+                        .and_then(|c| c.as_array())
+                    {
+                        for content_item in section_contents {
+                            if content_item.get("continuationItemRenderer").is_some() {
+                                return content_item
+                                    .get("continuationItemRenderer")
+                                    .and_then(|c| c.get("continuationEndpoint"))
+                                    .and_then(|e| e.get("continuationCommand"))
+                                    .and_then(|c| c.get("token"))
+                                    .and_then(|t| t.as_str())
+                                    .map(|s| s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn simplify_text(node: &serde_json::Value) -> String {
+    if node.is_null() {
+        return String::new();
+    }
+    if let Some(s) = node.as_str() {
+        return s.to_string();
+    }
+    if let Some(simple_text) = node.get("simpleText").and_then(|t| t.as_str()) {
+        return simple_text.to_string();
+    }
+    if let Some(runs) = node.get("runs").and_then(|r| r.as_array()) {
+        return runs
+            .iter()
+            .filter_map(|run| run.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("");
+    }
+    String::new()
+}
+
+fn recursive_find(obj: &serde_json::Value, key: &str) -> Vec<serde_json::Value> {
+    let mut found = Vec::new();
+    if let Some(obj_map) = obj.as_object() {
+        if obj_map.contains_key(key) {
+            found.push(obj_map[key].clone());
+        }
+        for value in obj_map.values() {
+            found.extend(recursive_find(value, key));
+        }
+    } else if let Some(arr) = obj.as_array() {
+        for item in arr {
+            found.extend(recursive_find(item, key));
+        }
+    }
+    found
+}
+
+fn all_strings(obj: &serde_json::Value) -> Vec<String> {
+    let mut strings = Vec::new();
+    if let Some(obj_map) = obj.as_object() {
+        for value in obj_map.values() {
+            strings.extend(all_strings(value));
+        }
+    } else if let Some(arr) = obj.as_array() {
+        for item in arr {
+            strings.extend(all_strings(item));
+        }
+    } else if let Some(s) = obj.as_str() {
+        strings.push(s.to_string());
+    }
+    strings
+}
+
+fn search_number_near(data: &serde_json::Value, words: &[&str]) -> String {
+    for s in all_strings(data) {
+        let sl = s.to_lowercase();
+        if words.iter().any(|w| sl.contains(w)) {
+            if let Some(captures) = regex::Regex::new(r"[\d][\d,. ]*").unwrap().captures(&s) {
+                return captures[0].replace(" ", "").replace(",", "");
+            }
+        }
+    }
+    String::new()
+}
+
+// find_likes function removed - now using likeCount directly from videoDetails
+
+fn find_subscriber_count(nd: &serde_json::Value) -> String {
+    // Look for subscriber count in next response
+    // Path: contents.twoColumnWatchNextResults.results.results.contents[1].videoSecondaryInfoRenderer.owner.videoOwnerRenderer.subscriberCountText.simpleText
+    
+    if let Some(contents) = nd.get("contents") {
+        if let Some(two_col) = contents.get("twoColumnWatchNextResults") {
+            if let Some(results) = two_col.get("results") {
+                if let Some(results2) = results.get("results") {
+                    if let Some(contents_array) = results2.get("contents").and_then(|c| c.as_array()) {
+                        if contents_array.len() > 1 {
+                            let item1 = &contents_array[1];
+                            
+                            if let Some(video_secondary) = item1.get("videoSecondaryInfoRenderer") {
+                                if let Some(owner) = video_secondary.get("owner") {
+                                    if let Some(video_owner) = owner.get("videoOwnerRenderer") {
+                                        if let Some(sub_text) = video_owner.get("subscriberCountText") {
+                                            if let Some(simple_text) = sub_text.get("simpleText").and_then(|t| t.as_str()) {
+                                                // Extract numeric part and convert K/M abbreviations
+                                                let cleaned = simple_text.replace(" подписчиков", "").replace(" подписчик", "");
+                                                
+                                                // Handle various formats including Russian abbreviations
+                                                // Russian: тыс (thousand), млн (million)
+                                                // English: K (thousand), M (million)
+                                                let re = regex::Regex::new(r"([\d,]+\.?\d*)\s*(млн|тыс|[KM]?)").unwrap();
+                                                if let Some(captures) = re.captures(&cleaned) {
+                                                    let number_part = &captures[1].replace(",", "").replace(".", ""); // Remove commas and dots
+                                                    let multiplier = &captures[2];
+                                                    
+                                                    if let Ok(number) = number_part.parse::<f64>() {
+                                                        let result = match multiplier {
+                                                            "млн" => (number * 1000000.0) as u64, // Russian million
+                                                            "тыс" => (number * 1000.0) as u64,    // Russian thousand
+                                                            "K" => (number * 1000.0) as u64,      // English thousand
+                                                            "M" => (number * 1000000.0) as u64,   // English million
+                                                            _ => number as u64,                   // No multiplier
+                                                        };
+                                                        return result.to_string();
+                                                    }
+                                                }
+                                                // If parsing fails, return the cleaned text
+                                                return cleaned;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    "0".to_string()
+}
+
+fn find_comments_count(pr: &serde_json::Value, nd: &serde_json::Value) -> String {
+    for d in [pr, nd] {
+        if d.is_null() {
+            continue;
+        }
+        // Exact match of Python logic:
+        // for ct in recursive_find(d, "commentCountText") + recursive_find(d, "countText"):
+        //     text = (
+        //         ct.get("simpleText") or
+        //         ct.get("runs", [{}])[0].get("text", "")
+        //     )
+        
+        let comment_texts = recursive_find(d, "commentCountText");
+        let count_texts = recursive_find(d, "countText");
+        
+        // Combine both lists like in Python (concatenation)
+        let all_texts: Vec<&serde_json::Value> = comment_texts.iter().chain(count_texts.iter()).collect();
+        
+        for ct in all_texts {
+            // Exact match of Python logic for text extraction
+            let text = ct
+                .get("simpleText")
+                .and_then(|st| st.as_str())
+                .or_else(|| {
+                    ct.get("runs")
+                        .and_then(|r| r.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|first_run| first_run.get("text"))
+                        .and_then(|t| t.as_str())
+                });
+            
+            if let Some(text_content) = text {
+                let n = text_content.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
+                if !n.is_empty() {
+                    return n;
+                }
+            }
+        }
+    }
+    // Fallback: search near comment-related text (like Python)
+    search_number_near(nd, &["comment", "comments", "коммент", "коммента"])
+}
+
+fn translate_russian_time(time_str: &str) -> String {
+    let time_lower = time_str.to_lowercase();
+    
+    // Russian to English translations
+    let translations = [
+        ("несколько секунд назад", "a few seconds ago"),
+        ("секунду назад", "a second ago"),
+        (" секунд назад", " seconds ago"),
+        (" секунды назад", " seconds ago"),
+        (" минуту назад", " a minute ago"),
+        (" минут назад", " minutes ago"),
+        (" часа назад", " hours ago"),
+        (" часов назад", " hours ago"),
+        (" день назад", " a day ago"),
+        (" дней назад", " days ago"),
+        (" недели назад", " weeks ago"),
+        (" недель назад", " weeks ago"),
+        (" месяц назад", " a month ago"),
+        (" месяцев назад", " months ago"),
+        (" года назад", " years ago"),
+        (" лет назад", " years ago"),
+        ("только что", "just now"),
+        ("сегодня", "today"),
+        ("вчера", "yesterday"),
+        ("позавчера", "day before yesterday"),
+    ];
+    
+    let mut result = time_str.to_string();
+    for (russian, english) in &translations {
+        if time_lower.contains(russian) {
+            result = result.replace(russian, english);
+            // Also try capitalized version
+            let capitalized_russian = format!("{}{}", 
+                russian.chars().next().unwrap().to_uppercase().collect::<String>(),
+                &russian[1..]
+            );
+            result = result.replace(&capitalized_russian, english);
+        }
+    }
+    
+    result
+}
+
+fn extract_comments(data: &serde_json::Value, base_url: &str) -> Vec<Comment> {
+    let mut comments = Vec::new();
+    
+    fn walk(obj: &serde_json::Value, comments: &mut Vec<Comment>, base_url: &str) {
+        if let Some(obj_map) = obj.as_object() {
+            if obj_map.contains_key("commentEntityPayload") {
+                let p = &obj_map["commentEntityPayload"];
+                let props = p.get("properties").unwrap_or(&serde_json::Value::Null);
+                let author = p
+                    .get("author")
+                    .and_then(|a| a.get("displayName"))
+                    .and_then(|d| d.as_str())
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Unknown")
+                    .to_string();
+                
+                // Extract text content - try both direct content and runs
+                let text = if let Some(content) = props.get("content") {
+                    if let Some(content_str) = content.get("content").and_then(|c| c.as_str()) {
+                        content_str.to_string()
+                    } else if let Some(runs) = content.get("runs").and_then(|r| r.as_array()) {
+                        runs.iter()
+                            .filter_map(|run| run.get("text").and_then(|t| t.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("")
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+                
+                if !text.trim().is_empty() {
+                    let published_at_raw = props
+                        .get("publishedTime")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    
+                    // Translate Russian time expressions to English
+                    let published_at = translate_russian_time(&published_at_raw);
+                    
+                    let author_thumbnail_raw = p
+                        .get("avatar")
+                        .and_then(|a| a.get("image"))
+                        .and_then(|i| i.get("sources"))
+                        .and_then(|s| s.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|src| src.get("url"))
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("");
+                    
+                    // Transform direct image URL to use /channel_icon/ endpoint
+                    let author_thumbnail = if !author_thumbnail_raw.is_empty() {
+                        format!("{}/channel_icon/{}", base_url, urlencoding::encode(author_thumbnail_raw))
+                    } else {
+                        "".to_string()
+                    };
+                    
+                    comments.push(Comment {
+                        author,
+                        text: text.trim().to_string(),
+                        published_at,
+                        author_thumbnail,
+                        author_channel_url: None,
+                    });
+                }
+            }
+            for value in obj_map.values() {
+                walk(value, comments, base_url);
+            }
+        } else if let Some(arr) = obj.as_array() {
+            for item in arr {
+                walk(item, comments, base_url);
+            }
+        }
+    }
+    
+    walk(data, &mut comments, base_url);
+    comments
 }
 
 lazy_static! {
@@ -454,250 +820,102 @@ pub async fn thumbnail_proxy(path: web::Path<String>, req: HttpRequest) -> impl 
     get,
     path = "/channel_icon/{path_video_id}",
     params(
-        ("path_video_id" = String, Path, description = "Channel ID, video ID, or direct image URL")
+        ("path_video_id" = String, Path, description = "Channel ID (UC...), @handle, video ID or direct image URL")
     ),
     responses(
-        (status = 200, description = "Channel icon image", content_type = "image/jpeg"),
-        (status = 404, description = "Channel icon not found")
+        (status = 200, description = "Channel icon image", content_type = "image/jpeg, image/png, image/webp"),
+        (status = 404, description = "Channel icon not found"),
+        (status = 400, description = "Bad request")
     )
 )]
 pub async fn channel_icon(
     path: web::Path<String>,
     data: web::Data<crate::AppState>,
 ) -> impl Responder {
-    let path_video_id = path.into_inner();
+    let input = path.into_inner();
     let config = &data.config;
 
-    // Декодируем URL если он закодирован
-    let decoded_path = urlencoding::decode(&path_video_id)
-        .map(|s| s.to_string())
-        .unwrap_or(path_video_id.clone());
+    // 1. Если это уже прямая ссылка на картинку — просто проксируем
+    let decoded = urlencoding::decode(&input)
+        .unwrap_or_else(|_| std::borrow::Cow::Owned(input.clone()))
+        .to_string();
+    
+    if decoded.starts_with("http://") || decoded.starts_with("https://") {
+        return proxy_image(&decoded).await;
+    }
 
-    if decoded_path.starts_with("http://") || decoded_path.starts_with("https://") {
-        let client = Client::builder()
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-            .build()
-            .unwrap();
+    let client = Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+        .build()
+        .unwrap();
 
-        match client.get(&decoded_path).send().await {
-            Ok(image_resp) => {
-                let headers = image_resp.headers().clone();
-                let content_type = headers
-                    .get("content-type")
-                    .and_then(|ct| ct.to_str().ok())
-                    .unwrap_or("image/jpeg")
-                    .to_string();
+    let innertube_key = match config.get_innertube_key() {
+        Some(key) => key,
+        None => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Missing innertube_key in config.yml"
+            }));
+        }
+    };
 
-                match image_resp.bytes().await {
-                    Ok(bytes) => HttpResponse::Ok()
-                        .content_type(content_type.as_str())
-                        .insert_header(("Cache-Control", "public, max-age=3600"))
-                        .body(bytes),
-                    Err(_) => HttpResponse::NotFound().finish(),
+    let ctx = serde_json::json!({
+        "client": {
+            "clientName": "WEB",
+            "clientVersion": "2.20250130.08.00",
+            "hl": "en",
+            "gl": "US"
+        }
+    });
+
+    let mut channel_id = String::new();
+
+    if input.len() == 24 && input.starts_with("UC") {
+        channel_id = input.clone();
+    } else if input.starts_with('@') {
+        // Получаем channelId из страницы канала
+        let handle = &input[1..];
+        let page_url = format!("https://www.youtube.com/@{}", handle);
+
+        if let Ok(resp) = client.get(&page_url).send().await {
+            if let Ok(html) = resp.text().await {
+                // Ищем в HTML: "channelId":"UCxxxxxxxxxxxxxxxxxxxxxx"
+                if let Some(start) = html.find(r#""channelId":"UC"#) {
+                    let slice = &html[start + 13..]; // после "channelId":"
+                    if let Some(end) = slice.find('"') {
+                        channel_id = slice[..end].to_string();
+                    }
+                }
+                // Альтернатива: ищем link rel="canonical" href="https://www.youtube.com/channel/UC...
+                if channel_id.is_empty() {
+                    if let Some(pos) = html.find(r#"<link rel="canonical" href="https://www.youtube.com/channel/"#) {
+                        let slice = &html[pos + 47..]; // длина префикса
+                        if let Some(end) = slice.find('"') {
+                            channel_id = slice[..end].to_string();
+                        }
+                    }
                 }
             }
-            Err(_) => HttpResponse::NotFound().finish(),
         }
     } else {
-        let apikey = config.get_api_key_rotated();
-        let quality = "default";
-
-        let channel_id = if path_video_id.starts_with("UC") {
-            path_video_id.clone()
-        } else if path_video_id.starts_with('@') {
-            let username = &path_video_id[1..];
-            let search_url = format!(
-                "https://www.googleapis.com/youtube/v3/channels?forUsername={}&key={}&part=id",
-                username, apikey
-            );
-
-            let client = Client::new();
-            match client.get(&search_url).send().await {
-                Ok(search_resp) => match search_resp.json::<serde_json::Value>().await {
-                    Ok(search_data) => {
-                        if let Some(items) = search_data.get("items").and_then(|i| i.as_array()) {
-                            if !items.is_empty() {
-                                if let Some(channel_id) =
-                                    items[0].get("id").and_then(|id| id.as_str())
-                                {
-                                    channel_id.to_string()
-                                } else {
-                                    return HttpResponse::NotFound().finish();
-                                }
-                            } else {
-                                let search_url = format!(
-                                        "https://www.googleapis.com/youtube/v3/search?part=snippet&q={}&type=channel&key={}",
-                                        username, apikey
-                                    );
-
-                                match client.get(&search_url).send().await {
-                                    Ok(search_resp) => {
-                                        match search_resp.json::<serde_json::Value>().await {
-                                            Ok(search_data) => {
-                                                if let Some(items) = search_data
-                                                    .get("items")
-                                                    .and_then(|i| i.as_array())
-                                                {
-                                                    if !items.is_empty() {
-                                                        if let Some(channel_id) = items[0]
-                                                            .get("snippet")
-                                                            .and_then(|s| s.get("channelId"))
-                                                            .and_then(|id| id.as_str())
-                                                        {
-                                                            channel_id.to_string()
-                                                        } else {
-                                                            return HttpResponse::NotFound()
-                                                                .finish();
-                                                        }
-                                                    } else {
-                                                        return HttpResponse::NotFound().finish();
-                                                    }
-                                                } else {
-                                                    return HttpResponse::NotFound().finish();
-                                                }
-                                            }
-                                            Err(_) => return HttpResponse::NotFound().finish(),
-                                        }
-                                    }
-                                    Err(_) => return HttpResponse::NotFound().finish(),
-                                }
-                            }
-                        } else {
-                            return HttpResponse::NotFound().finish();
-                        }
-                    }
-                    Err(_) => return HttpResponse::NotFound().finish(),
-                },
-                Err(_) => return HttpResponse::NotFound().finish(),
-            }
-        } else {
-            let video_url = format!(
-                "https://www.googleapis.com/youtube/v3/videos?id={}&key={}&part=snippet",
-                path_video_id, apikey
-            );
-
-            let client = Client::new();
-            match client.get(&video_url).send().await {
-                Ok(video_resp) => match video_resp.json::<serde_json::Value>().await {
-                    Ok(video_data) => {
-                        if let Some(items) = video_data.get("items").and_then(|i| i.as_array()) {
-                            if !items.is_empty() {
-                                if let Some(channel_id) = items[0]
-                                    .get("snippet")
-                                    .and_then(|s| s.get("channelId"))
-                                    .and_then(|id| id.as_str())
-                                {
-                                    channel_id.to_string()
-                                } else {
-                                    return HttpResponse::NotFound().finish();
-                                }
-                            } else {
-                                return HttpResponse::NotFound().finish();
-                            }
-                        } else {
-                            return HttpResponse::NotFound().finish();
-                        }
-                    }
-                    Err(_) => return HttpResponse::NotFound().finish(),
-                },
-                Err(_) => return HttpResponse::NotFound().finish(),
-            }
-        };
-
-        let channel_url = format!(
-            "https://www.googleapis.com/youtube/v3/channels?id={}&key={}&part=snippet",
-            channel_id, apikey
-        );
-
-        let client = Client::new();
-        match client.get(&channel_url).send().await {
-            Ok(channel_resp) => match channel_resp.json::<serde_json::Value>().await {
-                Ok(channel_data) => {
-                    if let Some(items) = channel_data.get("items").and_then(|i| i.as_array()) {
-                        if !items.is_empty() {
-                            if let Some(thumbnails) =
-                                items[0].get("snippet").and_then(|s| s.get("thumbnails"))
-                            {
-                                let quality_map = [
-                                    ("default", "default"),
-                                    ("medium", "medium"),
-                                    ("high", "high"),
-                                ];
-
-                                let thumbnail_quality = quality_map
-                                    .iter()
-                                    .find(|(q, _)| *q == quality)
-                                    .map(|(_, t)| *t)
-                                    .unwrap_or("default");
-
-                                let mut selected_quality = thumbnail_quality;
-                                if thumbnails.get(thumbnail_quality).is_none() {
-                                    let fallback_order =
-                                        [thumbnail_quality, "default", "medium", "high"];
-                                    for q in &fallback_order {
-                                        if thumbnails.get(q).is_some() {
-                                            selected_quality = q;
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                if let Some(thumbnail_url) = thumbnails
-                                    .get(selected_quality)
-                                    .and_then(|t| t.get("url"))
-                                    .and_then(|url| url.as_str())
-                                {
-                                    let mut final_url = thumbnail_url.to_string();
-                                    if final_url.contains("yt3.ggpht.com") {
-                                        final_url = final_url
-                                            .replace("yt3.ggpht.com", "yt3.googleusercontent.com");
-                                    }
-
-                                    let client = Client::builder()
-                                            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-                                            .build()
-                                            .unwrap();
-
-                                    match client.get(&final_url).send().await {
-                                        Ok(image_resp) => {
-                                            let headers = image_resp.headers().clone();
-                                            let content_type = headers
-                                                .get("content-type")
-                                                .and_then(|ct| ct.to_str().ok())
-                                                .unwrap_or("image/jpeg")
-                                                .to_string();
-
-                                            match image_resp.bytes().await {
-                                                Ok(bytes) => HttpResponse::Ok()
-                                                    .content_type(content_type.as_str())
-                                                    .insert_header((
-                                                        "Cache-Control",
-                                                        "public, max-age=3600",
-                                                    ))
-                                                    .body(bytes),
-                                                Err(_) => HttpResponse::NotFound().finish(),
-                                            }
-                                        }
-                                        Err(_) => HttpResponse::NotFound().finish(),
-                                    }
-                                } else {
-                                    HttpResponse::NotFound().finish()
-                                }
-                            } else {
-                                HttpResponse::NotFound().finish()
-                            }
-                        } else {
-                            HttpResponse::NotFound().finish()
-                        }
-                    } else {
-                        HttpResponse::NotFound().finish()
-                    }
-                }
-                Err(_) => HttpResponse::NotFound().finish(),
-            },
-            Err(_) => HttpResponse::NotFound().finish(),
-        }
+        // предполагаем video id → player endpoint
+        channel_id = get_channel_id_from_video(&client, &input, &innertube_key, &ctx).await;
     }
+
+    if channel_id.is_empty() {
+        return HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "Cannot determine channel ID"}));
+    }
+
+    // 3. Теперь получаем аватарку канала по channelId через /browse
+    let avatar_url = get_channel_avatar_url(&client, &channel_id, &innertube_key, &ctx).await;
+
+    if avatar_url.is_empty() {
+        return HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "Channel avatar not found"}));
+    }
+
+    // 4. Проксируем найденную картинку
+    proxy_image(&avatar_url).await
 }
 
 #[utoipa::path(
@@ -749,290 +967,229 @@ pub async fn get_ytvideo_info(
         .unwrap_or("true".to_string());
     let _use_video_proxy = proxy_param != "false";
 
-    let apikey = config.get_api_key_rotated();
+    // Use InnerTube API key from config
+    let innertube_key = match config.get_innertube_key() {
+        Some(key) => key,
+        None => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Missing innertube_key in config.yml"
+            }));
+        }
+    };
+
     let client = Client::new();
-
-    let video_url = format!(
-        "https://www.googleapis.com/youtube/v3/videos?id={}&key={}&part=snippet,contentDetails,statistics",
-        video_id, apikey
-    );
-
-    match client.get(&video_url).send().await {
-        Ok(video_resp) => match video_resp.json::<serde_json::Value>().await {
-            Ok(video_data) => {
-                let video_items = match video_data.get("items").and_then(|i| i.as_array()) {
-                    Some(items) => items,
-                    None => {
-                        return HttpResponse::Ok().json(serde_json::json!({
-                            "error": "Видео не найдено."
-                        }));
-                    }
-                };
-
-                if video_items.is_empty() {
-                    return HttpResponse::Ok().json(serde_json::json!({
-                    "error": "Видео не найдено."
-                    }));
-                }
-
-                let video_item = &video_items[0];
-                let video_info = match video_item.get("snippet") {
-                    Some(info) => info,
-                    None => {
-                        crate::log::info!("Error: Video snippet not found");
-                        return HttpResponse::InternalServerError().json(serde_json::json!({
-                            "error": "Internal server error"
-                        }));
-                    }
-                };
-
-                let content_details = match video_item.get("contentDetails") {
-                    Some(details) => details,
-                    None => {
-                        crate::log::info!("Error: Content details not found");
-                        return HttpResponse::InternalServerError().json(serde_json::json!({
-                            "error": "Internal server error"
-                        }));
-                    }
-                };
-
-                let statistics = video_item
-                    .get("statistics")
-                    .unwrap_or(&serde_json::Value::Null);
-                let channel_id = match video_info.get("channelId").and_then(|id| id.as_str()) {
-                    Some(id) => id,
-                    None => {
-                        crate::log::info!("Error: Channel ID not found");
-                        return HttpResponse::InternalServerError().json(serde_json::json!({
-                            "error": "Internal server error"
-                        }));
-                    }
-                };
-
-                let mut subscriber_count = "0".to_string();
-                let channel_url = format!(
-                        "https://www.googleapis.com/youtube/v3/channels?id={}&key={}&part=snippet,statistics",
-                        channel_id, apikey
-                    );
-
-                let mut channel_custom_url: Option<String> = None;
-                match client.get(&channel_url).send().await {
-                    Ok(channel_resp) => match channel_resp.json::<serde_json::Value>().await {
-                        Ok(channel_data) => {
-                            if let Some(channel_items) =
-                                channel_data.get("items").and_then(|i| i.as_array())
-                            {
-                                if !channel_items.is_empty() {
-                                    if let Some(snippet) =
-                                        channel_items[0].get("snippet").and_then(|s| s.as_object())
-                                    {
-                                        channel_custom_url = snippet
-                                            .get("customUrl")
-                                            .and_then(|c| c.as_str())
-                                            .map(|s| s.to_string());
-                                    }
-                                    if let Some(stats) = channel_items[0].get("statistics") {
-                                        subscriber_count = stats
-                                            .get("subscriberCount")
-                                            .and_then(|c| c.as_str())
-                                            .unwrap_or("0")
-                                            .to_string();
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            crate::log::info!("Error parsing channel data: {}", e);
-                        }
-                    },
-                    Err(e) => {
-                        crate::log::info!("Error fetching channel data: {}", e);
-                    }
-                }
-
-                let final_video_url = if config.video.source == "direct" {
-                    format!(
-                        "{}/direct_url?video_id={}&quality={}",
-                        base_trimmed, video_id, quality
-                    )
-                } else {
-                    "".to_string()
-                };
-
-                let final_video_url_with_proxy =
-                    if config.proxy.video_proxy && !final_video_url.is_empty() {
-                        format!(
-                            "{}/video.proxy?url={}",
-                            base_trimmed,
-                            urlencoding::encode(&final_video_url)
-                        )
-                    } else {
-                        final_video_url.clone()
-                    };
-
-                let mut comments: Vec<Comment> = Vec::new();
-                let comments_url = format!(
-                        "https://www.googleapis.com/youtube/v3/commentThreads?key={}&textFormat=plainText&part=snippet&videoId={}&maxResults=25",
-                        apikey, video_id
-                    );
-
-                match client.get(&comments_url).send().await {
-                    Ok(comments_resp) => {
-                        match comments_resp.json::<serde_json::Value>().await {
-                            Ok(comments_data) => {
-                                if let Some(comment_items) =
-                                    comments_data.get("items").and_then(|i| i.as_array())
-                                {
-                                    for item in comment_items {
-                                        if let Some(comment_snippet) = item
-                                            .get("snippet")
-                                            .and_then(|s| s.get("topLevelComment"))
-                                            .and_then(|c| c.get("snippet"))
-                                        {
-                                            let author = comment_snippet
-                                                .get("authorDisplayName")
-                                                .and_then(|a| a.as_str())
-                                                .unwrap_or("Unknown")
-                                                .to_string();
-
-                                            let text = comment_snippet
-                                                .get("textDisplay")
-                                                .and_then(|t| t.as_str())
-                                                .unwrap_or("")
-                                                .to_string();
-
-                                            let published_at = comment_snippet
-                                                .get("publishedAt")
-                                                .and_then(|p| p.as_str())
-                                                .unwrap_or("")
-                                                .to_string();
-
-                                            let raw_thumb = comment_snippet
-                                                .get("authorProfileImageUrl")
-                                                .and_then(|u| u.as_str())
-                                                .unwrap_or("")
-                                                .to_string();
-                                            let mut thumb = raw_thumb.clone();
-                                            if thumb.starts_with("//") {
-                                                thumb = format!("https:{}", thumb);
-                                            }
-                                            let author_channel_url = comment_snippet
-                                            .get("authorChannelUrl")
-                                            .and_then(|u| u.as_str())
-                                            .map(|s| s.to_string())
-                                            .or_else(|| {
-                                                comment_snippet
-                                                    .get("authorChannelId")
-                                                    .and_then(|c| c.get("value"))
-                                                    .and_then(|v| v.as_str())
-                                                    .map(|id| format!("https://www.youtube.com/channel/{}", id))
-                                            });
-                                            let author_thumbnail = if thumb.is_empty() {
-                                                "https://yt3.googleusercontent.com/a/default-user=s88-c-k-c0x00ffffff-no-rj".to_string()
-                                            } else {
-                                                format!(
-                                                    "{}/channel_icon/{}",
-                                                    base_trimmed,
-                                                    urlencoding::encode(&thumb)
-                                                )
-                                            };
-
-                                            comments.push(Comment {
-                                                author,
-                                                text,
-                                                published_at,
-                                                author_thumbnail,
-                                                author_channel_url,
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                crate::log::info!("Error parsing comments data: {}", e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        crate::log::info!("Error fetching comments: {}", e);
-                    }
-                }
-
-                let published_at = match video_info.get("publishedAt").and_then(|p| p.as_str()) {
-                    Some(date_str) => {
-                        if let Ok(datetime) = DateTime::parse_from_rfc3339(date_str) {
-                            datetime.format("%d.%m.%Y, %H:%M:%S").to_string()
-                        } else {
-                            date_str.to_string()
-                        }
-                    }
-                    None => "".to_string(),
-                };
-
-                let response = VideoInfoResponse {
-                    title: video_info
-                        .get("title")
-                        .and_then(|t| t.as_str())
-                        .map(sanitize_text)
-                        .unwrap_or_else(|| "".to_string()),
-                    author: video_info
-                        .get("channelTitle")
-                        .and_then(|a| a.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    subscriber_count,
-                    description: video_info
-                        .get("description")
-                        .and_then(|d| d.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    video_id: video_id.clone(),
-                    channel_custom_url: channel_custom_url.clone(),
-                    embed_url: format!("https://www.youtube.com/embed/{}", video_id),
-                    duration: content_details
-                        .get("duration")
-                        .and_then(|d| d.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    published_at,
-                    likes: statistics
-                        .get("likeCount")
-                        .and_then(|l| l.as_str())
-                        .map(|s| s.to_string()),
-                    views: statistics
-                        .get("viewCount")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    comment_count: statistics
-                        .get("commentCount")
-                        .and_then(|c| c.as_str())
-                        .map(|s| s.to_string()),
-                    comments,
-                    channel_thumbnail: format!(
-                        "{}/channel_icon/{}",
-                        base.trim_end_matches('/'),
-                        channel_id
-                    ),
-                    thumbnail: format!("{}/thumbnail/{}", base.trim_end_matches('/'), video_id),
-                    video_url: final_video_url_with_proxy,
-                };
-
-                HttpResponse::Ok().json(response)
-            }
+    
+    // Fetch initial player response (like in youtube_fetch.py)
+    let video_url = format!("https://www.youtube.com/watch?v={}", video_id);
+    
+    let html = match client.get(&video_url).send().await {
+        Ok(resp) => match resp.text().await {
+            Ok(text) => text,
             Err(e) => {
-                crate::log::info!("Error parsing video data: {}", e);
-                HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Internal server error"
-                }))
+                crate::log::info!("Error fetching video page: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Failed to fetch video page"
+                }));
             }
         },
         Err(e) => {
-            crate::log::info!("Error fetching video data: {}", e);
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Internal server error"
-            }))
+            crate::log::info!("Error fetching video page: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to fetch video page"
+            }));
         }
+    };
+    
+    // Extract ytcfg from HTML
+    let cfg = extract_ytcfg(&html);
+    let pr = extract_initial_player_response(&html);
+    let api_key = cfg.get("INNERTUBE_API_KEY").and_then(|v| v.as_str()).unwrap_or(innertube_key);
+    let ctx = cfg.get("INNERTUBE_CONTEXT").cloned().unwrap_or_else(|| {
+        serde_json::json!({
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": "2.20250101"
+            }
+        })
+    });
+    
+    // Call InnerTube next endpoint to get additional data
+    let next_payload = serde_json::json!({
+        "context": ctx,
+        "videoId": video_id
+    });
+    
+    let next_url = format!("https://www.youtube.com/youtubei/v1/next?key={}", api_key);
+    
+    let next_data = match client
+        .post(&next_url)
+        .header("Content-Type", "application/json")
+        .json(&next_payload)
+        .send()
+        .await
+    {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(data) => data,
+            Err(e) => {
+                crate::log::info!("Error parsing next response: {}", e);
+                serde_json::Value::Null
+            }
+        },
+        Err(e) => {
+            crate::log::info!("Error calling next endpoint: {}", e);
+            serde_json::Value::Null
+        }
+    };
+    
+    // Get comments token and fetch comments like in python script
+    let comments_token = get_comments_token(&next_data);
+    let mut cont_resp = serde_json::Value::Null;
+    
+    if let Some(token) = comments_token {
+        let cont_payload = serde_json::json!({
+            "context": ctx,
+            "continuation": token
+        });
+        
+        cont_resp = match client
+            .post(&next_url)
+            .header("Content-Type", "application/json")
+            .json(&cont_payload)
+            .send()
+            .await
+        {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(data) => data,
+                Err(e) => {
+                    crate::log::info!("Error parsing continuation response: {}", e);
+                    serde_json::Value::Null
+                }
+            },
+            Err(e) => {
+                crate::log::info!("Error calling continuation endpoint: {}", e);
+                serde_json::Value::Null
+            }
+        };
     }
+    
+    // Extract video details
+    let vd = pr.get("videoDetails").unwrap_or(&serde_json::Value::Null);
+    let micro = pr
+        .get("microformat")
+        .and_then(|m| m.get("playerMicroformatRenderer"))
+        .unwrap_or(&serde_json::Value::Null);
+    
+    // Extract likes count from microformat.playerMicroformatRenderer.likeCount
+    let likes = micro
+        .get("likeCount")
+        .and_then(|lc| lc.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    
+    let comm_cnt = find_comments_count(&pr, &next_data);
+    let subscriber_count = find_subscriber_count(&next_data);
+    
+    // Extract comments - try continuation response first, then next_data
+    let comments = if !cont_resp.is_null() {
+        extract_comments(&cont_resp, base_trimmed)
+    } else {
+        extract_comments(&next_data, base_trimmed)
+    };
+    
+    // Get channel ID
+    let channel_id = vd
+        .get("channelId")
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+    
+    // Format duration
+    let duration = if let Some(length_seconds) = vd.get("lengthSeconds").and_then(|l| l.as_str()) {
+        if let Ok(seconds) = length_seconds.parse::<u64>() {
+            format!("PT{}M{}S", seconds / 60, seconds % 60)
+        } else {
+            "".to_string()
+        }
+    } else {
+        "".to_string()
+    };
+    
+    // Format published date
+    let published_at = micro
+        .get("publishDate")
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+        .to_string();
+    
+    // Build final video URL
+    let final_video_url = if config.video.source == "direct" {
+        format!(
+            "{}/direct_url?video_id={}",
+            base_trimmed, video_id
+        )
+    } else {
+        "".to_string()
+    };
+    
+    let _final_video_url_with_proxy = if config.proxy.video_proxy && !final_video_url.is_empty() {
+        format!(
+            "{}/video.proxy?url={}",
+            base_trimmed,
+            urlencoding::encode(&final_video_url)
+        )
+    } else {
+        final_video_url.clone()
+    };
+    
+    let response = VideoInfoResponse {
+        title: vd
+            .get("title")
+            .and_then(|t| t.as_str())
+            .map(sanitize_text)
+            .unwrap_or_else(|| "".to_string()),
+        author: vd
+            .get("author")
+            .and_then(|a| a.as_str())
+            .unwrap_or(micro.get("ownerChannelName").and_then(|n| n.as_str()).unwrap_or(""))
+            .to_string(),
+        subscriber_count,
+        description: vd
+            .get("shortDescription")
+            .and_then(|d| d.as_str())
+            .unwrap_or(vd.get("description").and_then(|d| d.as_str()).unwrap_or(""))
+            .to_string(),
+        video_id: video_id.clone(),
+        channel_custom_url: micro
+            .get("ownerProfileUrl")
+            .and_then(|url| url.as_str())
+            .and_then(|url_str| {
+                // Extract the @username part from URLs like "http://www.youtube.com/@TheAnimeSelect"
+                url_str.rsplit('/').next().map(|part| part.to_string())
+            }),
+        embed_url: format!("https://www.youtube.com/embed/{}", video_id),
+        duration,
+        published_at,
+        likes: if !likes.is_empty() { Some(likes) } else { None },
+        views: vd
+            .get("viewCount")
+            .and_then(|v| v.as_str())
+            .map(|s| s.replace(",", "")),
+        comment_count: if !comm_cnt.is_empty() { 
+            Some(comm_cnt) 
+        } else { 
+            Some(comments.len().to_string()) 
+        },
+        comments,
+        channel_thumbnail: if !channel_id.is_empty() {
+            format!("{}/channel_icon/{}", base_trimmed, channel_id)
+        } else {
+            "".to_string()
+        },
+        thumbnail: format!("{}/thumbnail/{}", base_trimmed, video_id),
+        video_url: final_video_url,
+    };
+    
+    HttpResponse::Ok().json(response)
 }
 
 #[utoipa::path(
@@ -1097,226 +1254,188 @@ pub async fn get_related_videos(
         .and_then(|o| o.parse().ok())
         .unwrap_or(0);
 
-    let order = query_params
-        .get("order")
-        .map(|o| o.as_str())
-        .unwrap_or("relevance");
+    let desired_count = limit.max(20).min(100); // Target more videos like in Python script
 
-    let valid_orders = ["relevance", "date", "rating", "viewCount", "title"];
-    let search_order = if valid_orders.contains(&order) {
-        order
-    } else {
-        "relevance"
-    };
-
-    let max_results = limit.min(50).max(1);
-
-    let apikey = config.get_api_key_rotated();
     let client = Client::new();
-
-    let video_url = format!(
-        "https://www.googleapis.com/youtube/v3/videos?part=snippet&id={}&key={}",
-        video_id, apikey
-    );
-
-    let mut related_videos: Vec<RelatedVideo> = Vec::new();
-
-    match client.get(&video_url).send().await {
-        Ok(video_resp) => {
-            match video_resp.json::<serde_json::Value>().await {
-                Ok(video_data) => {
-                    if let Some(video_items) = video_data.get("items").and_then(|i| i.as_array()) {
-                        if !video_items.is_empty() {
-                            if let Some(video_info) = video_items[0].get("snippet") {
-                                let title = video_info
-                                    .get("title")
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or("");
-
-                                let search_query = title.split_whitespace().next().unwrap_or(title);
-
-                                let search_url = format!(
-                                    "https://www.googleapis.com/youtube/v3/search?part=snippet&q={}&type=video&maxResults={}&order={}&key={}",
-                                    urlencoding::encode(search_query),
-                                    max_results,
-                                    search_order,
-                                    apikey
-                                );
-
-                                match client.get(&search_url).send().await {
-                                    Ok(search_resp) => {
-                                        match search_resp.json::<serde_json::Value>().await {
-                                            Ok(search_data) => {
-                                                if let Some(search_items) = search_data
-                                                    .get("items")
-                                                    .and_then(|i| i.as_array())
-                                                {
-                                                    let start_index = offset as usize;
-                                                    let end_index = (offset + max_results) as usize;
-
-                                                    let paginated_items =
-                                                        if start_index < search_items.len() {
-                                                            let actual_end = std::cmp::min(
-                                                                end_index,
-                                                                search_items.len(),
-                                                            );
-                                                            &search_items[start_index..actual_end]
-                                                        } else {
-                                                            &[][..]
-                                                        };
-
-                                                    for video in paginated_items {
-                                                        if let Some(vid) = video
-                                                            .get("id")
-                                                            .and_then(|id| id.get("videoId"))
-                                                            .and_then(|v| v.as_str())
-                                                        {
-                                                            if vid == video_id {
-                                                                continue;
-                                                            }
-
-                                                            if let Some(vinfo) =
-                                                                video.get("snippet")
-                                                            {
-                                                                let title = vinfo
-                                                                    .get("title")
-                                                                    .and_then(|t| t.as_str())
-                                                                    .map(sanitize_text)
-                                                                    .unwrap_or(
-                                                                        "Unknown Title".to_string(),
-                                                                    );
-
-                                                                let author = vinfo
-                                                                    .get("channelTitle")
-                                                                    .and_then(|a| a.as_str())
-                                                                    .unwrap_or("Unknown Author")
-                                                                    .to_string();
-
-                                                                let channel_id = vinfo
-                                                                    .get("channelId")
-                                                                    .and_then(|id| id.as_str())
-                                                                    .unwrap_or("")
-                                                                    .to_string();
-
-                                                                let published_at = vinfo
-                                                                    .get("publishedAt")
-                                                                    .and_then(|p| p.as_str())
-                                                                    .unwrap_or("")
-                                                                    .to_string();
-
-                                                                let thumbnail = format!(
-                                                                    "{}/thumbnail/{}",
-                                                                    base_trimmed, vid
-                                                                );
-                                                                let color = dominant_color_from_url(&format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", vid)).await;
-                                                                let channel_thumbnail = format!(
-                                                                    "{}/channel_icon/{}",
-                                                                    base_trimmed,
-                                                                    if channel_id.is_empty() {
-                                                                        vid
-                                                                    } else {
-                                                                        channel_id.as_str()
-                                                                    }
-                                                                );
-
-                                                                let video_url = format!("{}/get-ytvideo-info.php?video_id={}&quality={}", 
-                                                                    base_trimmed, vid, quality);
-
-                                                                let final_url =
-                                                                    if config.proxy.video_proxy {
-                                                                        format!(
-                                                                            "{}/video.proxy?url={}",
-                                                                            base_trimmed,
-                                                                            urlencoding::encode(
-                                                                                &video_url
-                                                                            )
-                                                                        )
-                                                                    } else {
-                                                                        video_url
-                                                                    };
-
-                                                                let stats_url = format!(
-                                                                    "https://www.googleapis.com/youtube/v3/videos?part=statistics&id={}&key={}",
-                                                                    vid, apikey
-                                                                );
-
-                                                                let mut view_count =
-                                                                    "0".to_string();
-                                                                match client.get(&stats_url).send().await {
-                                                                    Ok(stats_resp) => {
-                                                                        match stats_resp.json::<serde_json::Value>().await {
-                                                                            Ok(stats_data) => {
-                                                                                if let Some(stats_items) = stats_data.get("items").and_then(|i| i.as_array()) {
-                                                                                    if !stats_items.is_empty() {
-                                                                                        view_count = stats_items[0]
-                                                                                            .get("statistics")
-                                                                                            .and_then(|s| s.get("viewCount"))
-                                                                                            .and_then(|v| v.as_str())
-                                                                                            .unwrap_or("0")
-                                                                                            .to_string();
-                                                                                    }
-                                                                                }
-                                                                            }
-                                                                            Err(_) => {}
-                                                                        }
-                                                                    }
-                                                                    Err(_) => {}
-                                                                }
-
-                                                                related_videos.push(RelatedVideo {
-                                                                    title,
-                                                                    author,
-                                                                    video_id: vid.to_string(),
-                                                                    views: view_count,
-                                                                    published_at,
-                                                                    thumbnail,
-                                                                    channel_thumbnail,
-                                                                    url: final_url,
-                                                                    source: "search".to_string(),
-                                                                    color,
-                                                                });
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                crate::log::info!(
-                                                    "Error parsing search data: {}",
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        crate::log::info!("Error fetching search data: {}", e);
-                                    }
-                                }
-                            }
-                        } else {
-                            return HttpResponse::NotFound().json(serde_json::json!({
-                                "error": "Видео не найдено."
-                            }));
-                        }
-                    }
-                }
-                Err(e) => {
-                    crate::log::info!("Error parsing video data: {}", e);
-                    return HttpResponse::InternalServerError().json(serde_json::json!({
-                        "error": "Internal server error"
-                    }));
-                }
-            }
-        }
-        Err(e) => {
-            crate::log::info!("Error fetching video data: {}", e);
+    
+    // Use InnerTube API key from config
+    let innertube_key = match config.get_innertube_key() {
+        Some(key) => key,
+        None => {
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Internal server error"
+                "error": "Missing innertube_key in config.yml"
             }));
         }
+    };
+    
+    let context = serde_json::json!({
+        "client": {
+            "clientName": "WEB",
+            "clientVersion": "2.20260128.05.00"
+        }
+    });
+
+    // Fetch initial HTML to get ytcfg
+    let watch_url = format!("https://www.youtube.com/watch?v={}", video_id);
+    let headers_map = {
+        let mut map = reqwest::header::HeaderMap::new();
+        map.insert(reqwest::header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/121.0.0.0 Safari/537.36".parse().unwrap());
+        map.insert(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9".parse().unwrap());
+        map.insert(reqwest::header::CONTENT_TYPE, "application/json".parse().unwrap());
+        map
+    };
+
+    let html_response = match client
+        .get(&watch_url)
+        .headers(headers_map.clone())
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+    {
+        Ok(resp) => resp.text().await.unwrap_or_default(),
+        Err(e) => {
+            crate::log::info!("Error fetching watch page: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to fetch video page"
+            }));
+        }
+    };
+
+    let ytcfg = extract_ytcfg(&html_response);
+    let api_key_from_cfg = ytcfg.get("INNERTUBE_API_KEY").and_then(|v| v.as_str()).unwrap_or(innertube_key);
+    let context_from_cfg = ytcfg.get("INNERTUBE_CONTEXT").cloned().unwrap_or(context);
+
+    // Make first InnerTube request
+    let next_url = format!("https://www.youtube.com/youtubei/v1/next?key={}", api_key_from_cfg);
+    let body = serde_json::json!({
+        "context": context_from_cfg,
+        "videoId": video_id
+    });
+
+    let next_response = match client
+        .post(&next_url)
+        .headers(headers_map.clone())
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(25))
+        .send()
+        .await
+    {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(json) => json,
+            Err(e) => {
+                crate::log::info!("Error parsing next response: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Failed to parse response"
+                }));
+            }
+        },
+        Err(e) => {
+            crate::log::info!("Error making next request: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to fetch related videos"
+            }));
+        }
+    };
+
+    // Extract initial related videos
+    let mut related_videos = extract_related_videos_from_response(&next_response);
+    let mut continuation = get_related_continuation(&next_response);
+    
+    // Load more videos through continuation if needed
+    let mut page = 1;
+    while let Some(cont_token) = continuation {
+        if related_videos.len() >= desired_count as usize || page >= 6 {
+            break;
+        }
+        
+        page += 1;
+        tokio::time::sleep(tokio::time::Duration::from_millis(1200 + (page as u64 * 300))).await;
+        
+        let cont_body = serde_json::json!({
+            "context": context_from_cfg,
+            "continuation": cont_token
+        });
+        
+        let cont_response = match client
+            .post(&next_url)
+            .headers(headers_map.clone())
+            .json(&cont_body)
+            .timeout(std::time::Duration::from_secs(25))
+            .send()
+            .await
+        {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(json) => json,
+                Err(_) => break,
+            },
+            Err(_) => break,
+        };
+        
+        let new_videos = extract_related_videos_from_response(&cont_response);
+        if new_videos.is_empty() {
+            break;
+        }
+        
+        related_videos.extend(new_videos);
+        continuation = get_related_continuation(&cont_response);
     }
 
-    HttpResponse::Ok().json(related_videos)
+    // Remove duplicates
+    let mut seen = std::collections::HashSet::new();
+    let unique_videos: Vec<_> = related_videos
+        .into_iter()
+        .filter(|v| {
+            if v.video_id == video_id || seen.contains(&v.video_id) {
+                false
+            } else {
+                seen.insert(v.video_id.clone());
+                true
+            }
+        })
+        .collect();
+
+    // Apply pagination
+    let start_index = offset as usize;
+    let end_index = (offset + limit) as usize;
+    let paginated_videos = if start_index < unique_videos.len() {
+        let actual_end = std::cmp::min(end_index, unique_videos.len());
+        &unique_videos[start_index..actual_end]
+    } else {
+        &[][..]
+    };
+
+    // Convert to our format
+    let mut result_videos: Vec<RelatedVideo> = Vec::new();
+    for video in paginated_videos {
+        let thumbnail = format!("{}/thumbnail/{}", base_trimmed, video.video_id);
+        let color = dominant_color_from_url(&format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", video.video_id)).await;
+        let channel_thumbnail = format!("{}/channel_icon/{}", base_trimmed, video.video_id);
+        
+        let video_url = format!("{}/get-ytvideo-info.php?video_id={}&quality={}", 
+            base_trimmed, video.video_id, quality);
+        
+        let final_url = if config.proxy.video_proxy {
+            format!("{}/video.proxy?url={}", 
+                base_trimmed, urlencoding::encode(&video_url))
+        } else {
+            video_url
+        };
+
+        result_videos.push(RelatedVideo {
+            title: video.title.clone(),
+            author: video.channel.clone(),
+            video_id: video.video_id.clone(),
+            views: video.views.clone(),
+            published_at: video.published.clone(),
+            thumbnail,
+            channel_thumbnail,
+            url: final_url,
+            source: "innertube".to_string(),
+            color,
+        });
+    }
+
+    HttpResponse::Ok().json(result_videos)
 }
 
 #[utoipa::path(
@@ -1612,4 +1731,355 @@ pub async fn download_video(req: HttpRequest, data: web::Data<crate::AppState>) 
             ))
             .finish()
     }
+}
+
+// Helper functions for InnerTube related videos
+
+fn get_related_continuation(data: &serde_json::Value) -> Option<String> {
+    // Try to find continuation token in the response
+    if let Some(contents) = data.get("contents")
+        .and_then(|c| c.get("twoColumnWatchNextResults"))
+        .and_then(|c| c.get("secondaryResults"))
+        .and_then(|c| c.get("secondaryResults"))
+        .and_then(|c| c.get("results"))
+        .and_then(|c| c.as_array())
+    {
+        for item in contents {
+            if let Some(item_section) = item.get("itemSectionRenderer") {
+                if let Some(contents_arr) = item_section.get("contents").and_then(|c| c.as_array()) {
+                    for content in contents_arr {
+                        if let Some(cont_renderer) = content.get("continuationItemRenderer") {
+                            if let Some(cont_endpoint) = cont_renderer
+                                .get("continuationEndpoint")
+                                .and_then(|ce| ce.get("continuationCommand"))
+                            {
+                                if let Some(token) = cont_endpoint.get("token").and_then(|t| t.as_str()) {
+                                    return Some(token.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone)]
+struct RelatedVideoInfo {
+    video_id: String,
+    title: String,
+    channel: String,
+    views: String,
+    duration: String,
+    thumbnail: String,
+    published: String,
+}
+
+fn extract_related_videos_from_response(data: &serde_json::Value) -> Vec<RelatedVideoInfo> {
+    let mut videos = Vec::new();
+    
+    // Walk through the JSON structure to find lockupViewModel entries
+    walk_json_for_videos(data, &mut videos);
+    
+    videos
+}
+
+fn walk_json_for_videos(obj: &serde_json::Value, videos: &mut Vec<RelatedVideoInfo>) {
+    match obj {
+        serde_json::Value::Object(map) => {
+            // Check if this is a lockupViewModel
+            if let Some(lockup_view_model) = map.get("lockupViewModel") {
+                if let Some(video_info) = extract_video_from_lockup(lockup_view_model) {
+                    videos.push(video_info);
+                }
+            }
+            
+            // Continue walking through all values
+            for (_, value) in map {
+                walk_json_for_videos(value, videos);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                walk_json_for_videos(item, videos);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_video_from_lockup(lockup: &serde_json::Value) -> Option<RelatedVideoInfo> {
+    let renderer_context = lockup.get("rendererContext")?.as_object()?;
+    let command_context = renderer_context.get("commandContext")?.as_object()?;
+    let on_tap = command_context.get("onTap")?.as_object()?;
+    let innertube_command = on_tap.get("innertubeCommand")?.as_object()?;
+    let watch_endpoint = innertube_command.get("watchEndpoint")?.as_object()?;
+    
+    let video_id = watch_endpoint.get("videoId")?.as_str()?.to_string();
+    
+    let metadata = lockup.get("metadata")?.as_object()?;
+    let lockup_metadata = metadata.get("lockupMetadataViewModel")?.as_object()?;
+    let title = lockup_metadata.get("title")?
+        .as_object()?
+        .get("content")?
+        .as_str()?
+        .to_string();
+    
+    // Extract metadata rows
+    let metadata_rows = metadata
+        .get("lockupMetadataViewModel")?
+        .as_object()?
+        .get("metadata")?
+        .as_object()?
+        .get("contentMetadataViewModel")?
+        .as_object()?
+        .get("metadataRows")?
+        .as_array()?
+        .to_vec();
+    
+    let mut channel = "—".to_string();
+    let mut views = "".to_string();
+    let mut published = "—".to_string();
+    
+    if !metadata_rows.is_empty() {
+        // First row typically contains channel name
+        if let Some(first_row) = metadata_rows.first() {
+            if let Some(metadata_parts) = first_row.as_object()
+                .and_then(|r| r.get("metadataParts"))
+                .and_then(|p| p.as_array()) 
+            {
+                if let Some(first_part) = metadata_parts.first() {
+                    if let Some(text_content) = first_part.as_object()
+                        .and_then(|p| p.get("text"))
+                        .and_then(|t| t.as_object())
+                        .and_then(|t| t.get("content"))
+                        .and_then(|c| c.as_str())
+                    {
+                        channel = text_content.trim().to_string();
+                    }
+                }
+            }
+        }
+        
+        // Second row typically contains views and published time
+        if metadata_rows.len() > 1 {
+            if let Some(second_row) = metadata_rows.get(1) {
+                if let Some(metadata_parts) = second_row.as_object()
+                    .and_then(|r| r.get("metadataParts"))
+                    .and_then(|p| p.as_array())
+                {
+                    // Views (first part)
+                    if metadata_parts.len() >= 1 {
+                        if let Some(views_raw) = metadata_parts[0].as_object()
+                            .and_then(|p| p.get("text"))
+                            .and_then(|t| t.as_object())
+                            .and_then(|t| t.get("content"))
+                            .and_then(|c| c.as_str())
+                        {
+                            views = clean_views_string(views_raw);
+                        }
+                    }
+                    
+                    // Published time (second part)
+                    if metadata_parts.len() >= 2 {
+                        if let Some(published_raw) = metadata_parts[1].as_object()
+                            .and_then(|p| p.get("text"))
+                            .and_then(|t| t.as_object())
+                            .and_then(|t| t.get("content"))
+                            .and_then(|c| c.as_str())
+                        {
+                            published = published_raw.trim().to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Extract duration from thumbnail overlays
+    let mut duration = "—".to_string();
+    if let Some(content_image) = lockup.get("contentImage").and_then(|ci| ci.as_object()) {
+        if let Some(thumbnail_vm) = content_image.get("thumbnailViewModel").and_then(|tvm| tvm.as_object()) {
+            if let Some(overlays) = thumbnail_vm.get("overlays").and_then(|o| o.as_array()) {
+                for overlay in overlays {
+                    if let Some(badge_vm) = overlay.as_object()
+                        .and_then(|o| o.get("thumbnailOverlayBadgeViewModel"))
+                        .and_then(|bvm| bvm.as_object())
+                    {
+                        if let Some(thumbnail_badges) = badge_vm.get("thumbnailBadges").and_then(|tb| tb.as_array()) {
+                            if let Some(first_badge) = thumbnail_badges.first() {
+                                if let Some(badge_text) = first_badge.as_object()
+                                    .and_then(|b| b.get("thumbnailBadgeViewModel"))
+                                    .and_then(|tbm| tbm.as_object())
+                                    .and_then(|tbm| tbm.get("text"))
+                                    .and_then(|t| t.as_str())
+                                {
+                                    duration = badge_text.to_string();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Extract thumbnail
+    let mut thumbnail = String::new();
+    if let Some(content_image) = lockup.get("contentImage").and_then(|ci| ci.as_object()) {
+        if let Some(thumbnail_vm) = content_image.get("thumbnailViewModel").and_then(|tvm| tvm.as_object()) {
+            if let Some(image) = thumbnail_vm.get("image").and_then(|i| i.as_object()) {
+                if let Some(sources) = image.get("sources").and_then(|s| s.as_array()) {
+                    if let Some(last_source) = sources.last() {
+                        if let Some(url) = last_source.as_object().and_then(|s| s.get("url")).and_then(|u| u.as_str()) {
+                            thumbnail = url.to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    Some(RelatedVideoInfo {
+        video_id,
+        title,
+        channel,
+        views,
+        duration,
+        thumbnail,
+        published,
+    })
+}
+
+// ────────────────────────────────────────────────
+// Вспомогательные функции
+// ────────────────────────────────────────────────
+
+async fn get_channel_id_from_video(
+    client: &Client,
+    video_id: &str,
+    key: &str,
+    ctx: &serde_json::Value,
+) -> String {
+    let url = format!("https://www.youtube.com/youtubei/v1/player?key={}", key);
+
+    let payload = serde_json::json!({
+        "context": ctx,
+        "videoId": video_id
+    });
+
+    match client
+        .post(&url)
+        .json(&payload)
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                json.pointer("/videoDetails/channelId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            } else {
+                String::new()
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+async fn get_channel_avatar_url(
+    client: &Client,
+    channel_id: &str,
+    key: &str,
+    ctx: &serde_json::Value,
+) -> String {
+    let url = format!("https://www.youtube.com/youtubei/v1/browse?key={}", key);
+
+    let payload = serde_json::json!({
+        "context": ctx,
+        "browseId": channel_id
+    });
+
+    match client
+        .post(&url)
+        .json(&payload)
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                // Самый надёжный путь — c4TabbedHeaderRenderer → avatar → thumbnails
+                if let Some(header) = json.pointer("/header/c4TabbedHeaderRenderer") {
+                    if let Some(thumbs) = header
+                        .pointer("/avatar/thumbnails")
+                        .and_then(|arr| arr.as_array())
+                    {
+                        // Берём самую большую
+                        if let Some(best) = thumbs.iter().max_by_key(|t| {
+                            let w = t.pointer("/width").and_then(|w| w.as_u64()).unwrap_or(0);
+                            w
+                        }) {
+                            if let Some(u) = best.pointer("/url").and_then(|u| u.as_str()) {
+                                let mut url = u.to_string();
+                                // Заменяем старый домен на новый (часто встречается)
+                                if url.contains("yt3.ggpht.com") {
+                                    url = url.replace("yt3.ggpht.com", "yt3.googleusercontent.com");
+                                }
+                                return url;
+                            }
+                        }
+                    }
+                }
+
+                // Запасной путь — в metadata
+                json.pointer("/metadata/channelMetadataRenderer/avatar/thumbnails")
+                    .and_then(|arr| arr.as_array())
+                    .and_then(|thumbs| thumbs.last())
+                    .and_then(|t| t.get("url").and_then(|u| u.as_str()))
+                    .unwrap_or("")
+                    .to_string()
+            } else {
+                String::new()
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+async fn proxy_image(url: &str) -> HttpResponse {
+    let client = Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+        .build()
+        .unwrap();
+
+    match client.get(url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("image/jpeg")
+                .to_string();
+
+            match resp.bytes().await {
+                Ok(bytes) => HttpResponse::Ok()
+                    .content_type(content_type)
+                    .insert_header(("Cache-Control", "public, max-age=86400"))
+                    .body(bytes),
+                Err(_) => HttpResponse::NotFound().finish(),
+            }
+        }
+        _ => HttpResponse::NotFound().finish(),
+    }
+}
+
+fn clean_views_string(views_raw: &str) -> String {
+    let cleaned = views_raw.replace(|c: char| !c.is_ascii_digit() && c != 'K' && c != 'M' && c != '.', "");
+    cleaned.replace("K", "000").replace("M", "000000").replace(".", "")
 }
