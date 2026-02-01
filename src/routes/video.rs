@@ -114,11 +114,14 @@ fn simplify_text(node: &serde_json::Value) -> String {
         return simple_text.to_string();
     }
     if let Some(runs) = node.get("runs").and_then(|r| r.as_array()) {
-        return runs
-            .iter()
-            .filter_map(|run| run.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join("");
+        // More efficient string collection without intermediate vector
+        let mut result = String::new();
+        for run in runs {
+            if let Some(text) = run.get("text").and_then(|t| t.as_str()) {
+                result.push_str(text);
+            }
+        }
+        return result;
     }
     String::new()
 }
@@ -168,7 +171,161 @@ fn search_number_near(data: &serde_json::Value, words: &[&str]) -> String {
     String::new()
 }
 
-// find_likes function removed - now using likeCount directly from videoDetails
+fn find_likes(next_data: &serde_json::Value) -> String {
+    // Follow the exact Python script logic
+    // Navigate to: next_data["contents"]["twoColumnWatchNextResults"]["results"]["results"]["contents"][0]["videoPrimaryInfoRenderer"]["videoActions"]["menuRenderer"]["topLevelButtons"][0]["segmentedLikeDislikeButtonViewModel"]
+    if let Some(contents) = next_data
+        .get("contents")
+        .and_then(|c| c.get("twoColumnWatchNextResults"))
+        .and_then(|c| c.get("results"))
+        .and_then(|r| r.get("results"))
+        .and_then(|r| r.get("contents"))
+        .and_then(|c| c.as_array())
+    {
+        if !contents.is_empty() {
+            if let Some(primary_info) = contents[0].get("videoPrimaryInfoRenderer") {
+                if let Some(video_actions) = primary_info.get("videoActions") {
+                    if let Some(menu_renderer) = video_actions.get("menuRenderer") {
+                        if let Some(top_level_buttons) = menu_renderer.get("topLevelButtons").and_then(|btns| btns.as_array()) {
+                            if !top_level_buttons.is_empty() {
+                                if let Some(button) = top_level_buttons[0].get("segmentedLikeDislikeButtonViewModel") {
+                                    // Now navigate to: likeButtonViewModel.likeButtonViewModel.toggleButtonViewModel.toggleButtonViewModel
+                                    if let Some(like_button_vm) = button.get("likeButtonViewModel") {
+                                        if let Some(like_button_vm2) = like_button_vm.get("likeButtonViewModel") {
+                                            if let Some(toggle_button_vm) = like_button_vm2.get("toggleButtonViewModel") {
+                                                if let Some(toggle_button_vm2) = toggle_button_vm.get("toggleButtonViewModel") {
+                                                    // 1. Try toggledButtonViewModel (like in Python script)
+                                                    if let Some(toggled_btn) = toggle_button_vm2.get("toggledButtonViewModel") {
+                                                        if let Some(button_vm) = toggled_btn.get("buttonViewModel",) {
+                                                            if let Some(title) = button_vm.get("title").and_then(|t| t.as_str()) {
+                                                                if !title.is_empty() && title.chars().any(|c| c.is_ascii_digit()) {
+                                                                    println!("DEBUG: взято из toggled.title = {}", title);
+                                                                    return parse_human_number(title);
+                                                                }
+                                                            }
+                                                            
+                                                            // Also try accessibilityText from toggled button
+                                                            if let Some(acc_text) = button_vm.get("accessibilityText").and_then(|t| t.as_str()) {
+                                                                if !acc_text.is_empty() {
+                                                                    // Try pattern "along with X other"
+                                                                    if let Some(caps) = regex::Regex::new(r"along with ([\d, ]*) other").unwrap().captures(acc_text) {
+                                                                        let num = caps[1].replace(",", "").replace(" ", "");
+                                                                        println!("DEBUG: взято из accessibility = {}", num);
+                                                                        return num;
+                                                                    }
+                                                                    // Try general digit pattern
+                                                                    if let Some(caps) = regex::Regex::new(r"(\d[\d, ]*)").unwrap().captures(acc_text) {
+                                                                        return parse_human_number(&caps[1]);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    
+                                                    // 2. Try defaultButtonViewModel (like in Python script)
+                                                    if let Some(default_btn) = toggle_button_vm2.get("defaultButtonViewModel") {
+                                                        if let Some(button_vm) = default_btn.get("buttonViewModel") {
+                                                            if let Some(title) = button_vm.get("title").and_then(|t| t.as_str()) {
+                                                                if !title.is_empty() && title.chars().any(|c| c.is_ascii_digit()) {
+                                                                    println!("DEBUG: взято из default.title = {}", title);
+                                                                    return parse_human_number(title);
+                                                                }
+                                                            }
+                                                            
+                                                            // Also try accessibilityText from default button
+                                                            if let Some(acc_text) = button_vm.get("accessibilityText").and_then(|t| t.as_str()) {
+                                                                if !acc_text.is_empty() {
+                                                                    // Try pattern "along with X other"
+                                                                    if let Some(caps) = regex::Regex::new(r"along with ([\d, ]*) other").unwrap().captures(acc_text) {
+                                                                        let num = caps[1].replace(",", "").replace(" ", "");
+                                                                        println!("DEBUG: взято из accessibility = {}", num);
+                                                                        return num;
+                                                                    }
+                                                                    // Try general digit pattern
+                                                                    if let Some(caps) = regex::Regex::new(r"(\d[\d, ]*)").unwrap().captures(acc_text) {
+                                                                        return parse_human_number(&caps[1]);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Fallback to the old method
+    if let Some(micro) = next_data
+        .get("microformat")
+        .and_then(|m| m.get("playerMicroformatRenderer"))
+    {
+        if let Some(like_count) = micro.get("likeCount").and_then(|lc| lc.as_str()) {
+            return like_count.to_string();
+        }
+    }
+    
+    // Final fallback: search near like-related text
+    search_number_near(next_data, &["like", "likes", "лайк", "лайков", "лайка"])
+}
+
+fn parse_human_number(s: &str) -> String {
+    if s.is_empty() {
+        return "0".to_string();
+    }
+    
+    let trimmed = s.trim();
+    let mut cleaned = String::with_capacity(trimmed.len());
+    
+    // More efficient character processing without multiple allocations
+    for c in trimmed.chars() {
+        if c != ',' && c != ' ' {
+            cleaned.push(c.to_ascii_uppercase());
+        }
+    }
+    
+    // Check for multipliers more efficiently
+    if cleaned.len() > 1 {
+        let last_char = cleaned.chars().last().unwrap();
+        if last_char.is_alphabetic() {
+            let num_part = &cleaned[..cleaned.len()-1];
+            match last_char {
+                'K' => {
+                    if let Ok(num) = num_part.parse::<f64>() {
+                        return ((num * 1000.0).round() as i64).to_string();
+                    }
+                },
+                'M' => {
+                    if let Ok(num) = num_part.parse::<f64>() {
+                        return ((num * 1000000.0).round() as i64).to_string();
+                    }
+                },
+                'B' => {
+                    if let Ok(num) = num_part.parse::<f64>() {
+                        return ((num * 1000000000.0).round() as i64).to_string();
+                    }
+                },
+                _ => {} // Not a recognized multiplier
+            }
+        }
+    }
+    
+    // Extract digits only more efficiently
+    let mut result = String::new();
+    for c in cleaned.chars() {
+        if c.is_ascii_digit() {
+            result.push(c);
+        }
+    }
+    result
+}
 
 fn find_subscriber_count(nd: &serde_json::Value) -> String {
     // Look for subscriber count in next response
@@ -227,6 +384,37 @@ fn find_subscriber_count(nd: &serde_json::Value) -> String {
 }
 
 fn find_comments_count(pr: &serde_json::Value, nd: &serde_json::Value) -> String {
+    // First try the Python script approach
+    // Look for engagement panels like in Python
+    if let Some(panels) = nd.get("engagementPanels").and_then(|p| p.as_array()) {
+        for panel in panels {
+            if let Some(panel_renderer) = panel.get("engagementPanelSectionListRenderer") {
+                if let Some(identifier) = panel_renderer.get("panelIdentifier").and_then(|id| id.as_str()) {
+                    if identifier == "engagement-panel-comments-section" {
+                        if let Some(header) = panel_renderer.get("header") {
+                            if let Some(title_header_renderer) = header.get("engagementPanelTitleHeaderRenderer") {
+                                if let Some(contextual_info) = title_header_renderer.get("contextualInfo") {
+                                    if let Some(runs) = contextual_info.get("runs").and_then(|r| r.as_array()) {
+                                        if !runs.is_empty() {
+                                            if let Some(first_run) = runs[0].get("text").and_then(|t| t.as_str()) {
+                                                // Extract numbers from the text
+                                                let result = first_run.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
+                                                if !result.is_empty() {
+                                                    return result;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Fallback to the original approach
     for d in [pr, nd] {
         if d.is_null() {
             continue;
@@ -320,6 +508,8 @@ fn extract_comments(data: &serde_json::Value, base_url: &str) -> Vec<Comment> {
             if obj_map.contains_key("commentEntityPayload") {
                 let p = &obj_map["commentEntityPayload"];
                 let props = p.get("properties").unwrap_or(&serde_json::Value::Null);
+                
+                // Extract author - try multiple paths like in Python script
                 let author = p
                     .get("author")
                     .and_then(|a| a.get("displayName"))
@@ -329,32 +519,50 @@ fn extract_comments(data: &serde_json::Value, base_url: &str) -> Vec<Comment> {
                     .unwrap_or("Unknown")
                     .to_string();
                 
-                // Extract text content - try both direct content and runs
-                let text = if let Some(content) = props.get("content") {
-                    if let Some(content_str) = content.get("content").and_then(|c| c.as_str()) {
+                // Extract text content - try both direct content and runs like in Python
+                let text = if let Some(content_obj) = p.get("properties").and_then(|props| props.get("content")) {
+                    if let Some(content_str) = content_obj.get("content").and_then(|c| c.as_str()) {
                         content_str.to_string()
-                    } else if let Some(runs) = content.get("runs").and_then(|r| r.as_array()) {
-                        runs.iter()
-                            .filter_map(|run| run.get("text").and_then(|t| t.as_str()))
-                            .collect::<Vec<_>>()
-                            .join("")
+                    } else if let Some(runs) = content_obj.get("runs").and_then(|r| r.as_array()) {
+                        // More efficient string building without intermediate vector
+                        let mut text = String::new();
+                        for run in runs {
+                            if let Some(run_text) = run.get("text").and_then(|t| t.as_str()) {
+                                text.push_str(run_text);
+                            }
+                        }
+                        text
                     } else {
                         String::new()
                     }
                 } else {
-                    String::new()
+                    // Alternative extraction path like Python
+                    let content = props.get("content").unwrap_or(&serde_json::Value::Null);
+                    if let Some(runs) = content.get("runs").and_then(|r| r.as_array()) {
+                        // More efficient string building without intermediate vector
+                        let mut text = String::new();
+                        for run in runs {
+                            if let Some(run_text) = run.get("text").and_then(|t| t.as_str()) {
+                                text.push_str(run_text);
+                            }
+                        }
+                        text
+                    } else {
+                        String::new()
+                    }
                 };
                 
                 if !text.trim().is_empty() {
+                    // Extract published time
                     let published_at_raw = props
                         .get("publishedTime")
                         .and_then(|p| p.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
+                        .unwrap_or("unknown");
                     
-                    // Translate Russian time expressions to English
-                    let published_at = translate_russian_time(&published_at_raw);
+                    // Translate Russian time expressions to English (avoid cloning if not needed)
+                    let published_at = translate_russian_time(published_at_raw);
                     
+                    // Extract author thumbnail
                     let author_thumbnail_raw = p
                         .get("avatar")
                         .and_then(|a| a.get("image"))
@@ -369,22 +577,24 @@ fn extract_comments(data: &serde_json::Value, base_url: &str) -> Vec<Comment> {
                     let author_thumbnail = if !author_thumbnail_raw.is_empty() {
                         format!("{}/channel_icon/{}", base_url, urlencoding::encode(author_thumbnail_raw))
                     } else {
-                        "".to_string()
+                        String::new()
                     };
                     
                     comments.push(Comment {
                         author,
-                        text: text.trim().to_string(),
+                        text: text.trim().to_string(),  // Only trim if necessary
                         published_at,
                         author_thumbnail,
                         author_channel_url: None,
                     });
                 }
             }
+            // More efficient iteration over values
             for value in obj_map.values() {
                 walk(value, comments, base_url);
             }
         } else if let Some(arr) = obj.as_array() {
+            // More efficient iteration over array
             for item in arr {
                 walk(item, comments, base_url);
             }
@@ -419,13 +629,24 @@ fn sanitize_text(input: &str) -> String {
         .unwrap_or_else(|_| input.into())
         .to_string();
     let decoded = decode_html_entities(&decoded).to_string();
-    decoded
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect()
+    
+    // More efficient sanitization without creating intermediate vectors
+    let mut result = String::new();
+    let mut prev_was_space = false;
+    
+    for c in decoded.chars() {
+        if c.is_whitespace() {
+            if !prev_was_space && !result.is_empty() {
+                result.push(' ');
+                prev_was_space = true;
+            }
+        } else if !c.is_control() {
+            result.push(c);
+            prev_was_space = false;
+        }
+    }
+    
+    result
 }
 
 async fn dominant_color_from_url(url: &str) -> Option<String> {
@@ -957,7 +1178,7 @@ pub async fn get_ytvideo_info(
         }
     };
 
-    let quality = query_params
+    let _quality = query_params
         .get("quality")
         .map(|s| s.as_str())
         .unwrap_or(&config.video.default_quality);
@@ -1004,7 +1225,7 @@ pub async fn get_ytvideo_info(
     let cfg = extract_ytcfg(&html);
     let pr = extract_initial_player_response(&html);
     let api_key = cfg.get("INNERTUBE_API_KEY").and_then(|v| v.as_str()).unwrap_or(innertube_key);
-    let ctx = cfg.get("INNERTUBE_CONTEXT").cloned().unwrap_or_else(|| {
+    let mut ctx = cfg.get("INNERTUBE_CONTEXT").cloned().unwrap_or_else(|| {
         serde_json::json!({
             "client": {
                 "clientName": "WEB",
@@ -1012,6 +1233,12 @@ pub async fn get_ytvideo_info(
             }
         })
     });
+    
+    // Ensure region and language settings are applied
+    if let Some(client) = ctx.get_mut("client").and_then(|c| c.as_object_mut()) {
+        client.insert("gl".to_string(), serde_json::Value::String("US".to_string())); // Set region to USA
+        client.insert("hl".to_string(), serde_json::Value::String("en-US".to_string())); // Set language to English (USA)
+    }
     
     // Call InnerTube next endpoint to get additional data
     let next_payload = serde_json::json!({
@@ -1072,54 +1299,144 @@ pub async fn get_ytvideo_info(
         };
     }
     
-    // Extract video details
+    // Extract video details - do this once and cache results
     let vd = pr.get("videoDetails").unwrap_or(&serde_json::Value::Null);
     let micro = pr
         .get("microformat")
         .and_then(|m| m.get("playerMicroformatRenderer"))
         .unwrap_or(&serde_json::Value::Null);
     
-    // Extract likes count from microformat.playerMicroformatRenderer.likeCount
-    let likes = micro
-        .get("likeCount")
-        .and_then(|lc| lc.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_default();
-    
-    let comm_cnt = find_comments_count(&pr, &next_data);
-    let subscriber_count = find_subscriber_count(&next_data);
-    
-    // Extract comments - try continuation response first, then next_data
+    // Extract comments first as this may be slow, do it in parallel conceptually
     let comments = if !cont_resp.is_null() {
         extract_comments(&cont_resp, base_trimmed)
     } else {
         extract_comments(&next_data, base_trimmed)
     };
     
-    // Get channel ID
-    let channel_id = vd
-        .get("channelId")
-        .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_string();
+    // Extract likes count using improved function
+    let likes = find_likes(&next_data);
     
-    // Format duration
+    // Extract other metrics
+    let comm_cnt = find_comments_count(&pr, &next_data);
+    let subscriber_count = find_subscriber_count(&next_data);
+    
+    // Efficiently extract all data in one pass through the JSON
+    let mut title = String::new();
+    let mut author = String::new();
+    let mut description = String::new();
+    let mut published_at = String::new();
+    let mut views = String::new();
+    let mut channel_id = String::new();
+    let mut channel_thumbnail = String::new();
+    let duration = String::new();
+    
+    // Direct extraction from primary sources with minimal chaining
+    if let Some(contents) = next_data.get("contents") {
+        if let Some(two_col) = contents.get("twoColumnWatchNextResults") {
+            if let Some(results) = two_col.get("results") {
+                if let Some(results_inner) = results.get("results") {
+                    if let Some(contents_array) = results_inner.get("contents").and_then(|c| c.as_array()) {
+                        if contents_array.len() > 1 {
+                            // Process primary info (index 0)
+                            if let Some(primary_info) = contents_array[0].get("videoPrimaryInfoRenderer") {
+                                // Extract title efficiently
+                                if let Some(title_val) = primary_info.get("title") {
+                                    title = simplify_text(title_val);
+                                }
+                                
+                                // Extract published date efficiently
+                                if let Some(date_text) = primary_info.get("dateText") {
+                                    published_at = simplify_text(date_text);
+                                }
+                                
+                                // Extract view count efficiently
+                                if let Some(view_count) = primary_info.get("viewCount") {
+                                    if let Some(video_view_count) = view_count.get("videoViewCountRenderer") {
+                                        if let Some(view_count_simple) = video_view_count.get("viewCount") {
+                                            views = simplify_text(view_count_simple);
+                                            // Extract only digits from views more efficiently
+                                            views.retain(|c| c.is_ascii_digit());
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Process secondary info (index 1)
+                            if let Some(secondary_info) = contents_array[1].get("videoSecondaryInfoRenderer") {
+                                // Extract description
+                                if let Some(attr_desc) = secondary_info.get("attributedDescription") {
+                                    description = attr_desc.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                                }
+                                
+                                // Extract owner info
+                                if let Some(owner) = secondary_info.get("owner").and_then(|o| o.get("videoOwnerRenderer")) {
+                                    // Extract author name
+                                    if let Some(title_val) = owner.get("title") {
+                                        author = simplify_text(title_val);
+                                    }
+                                    
+                                    // Extract channel ID
+                                    if let Some(nav_endpoint) = owner.get("navigationEndpoint") {
+                                        if let Some(browse_endpoint) = nav_endpoint.get("browseEndpoint") {
+                                            channel_id = browse_endpoint.get("browseId").and_then(|b| b.as_str()).unwrap_or("").to_string();
+                                        }
+                                    }
+                                    
+                                    // Extract channel thumbnail
+                                    if let Some(thumbnails) = owner.get("thumbnail").and_then(|t| t.get("thumbnails")).and_then(|arr| arr.as_array()) {
+                                        if !thumbnails.is_empty() {
+                                            channel_thumbnail = thumbnails[0].get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Fallback to original extraction if data not found, using cached values
+    if title.is_empty() {
+        title = vd.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    }
+    if author.is_empty() {
+        if let Some(author_val) = vd.get("author").and_then(|a| a.as_str()) {
+            author = author_val.to_string();
+        } else if let Some(owner_name) = micro.get("ownerChannelName").and_then(|n| n.as_str()) {
+            author = owner_name.to_string();
+        }
+    }
+    if description.is_empty() {
+        if let Some(desc_val) = vd.get("shortDescription").and_then(|d| d.as_str()) {
+            description = desc_val.to_string();
+        } else if let Some(desc_val) = vd.get("description").and_then(|d| d.as_str()) {
+            description = desc_val.to_string();
+        }
+    }
+    if published_at.is_empty() {
+        published_at = micro.get("publishDate").and_then(|p| p.as_str()).unwrap_or("").to_string();
+    }
+    if views.is_empty() {
+        if let Some(view_str) = vd.get("viewCount").and_then(|v| v.as_str()) {
+            views = view_str.chars().filter(|c| c.is_ascii_digit()).collect();
+        }
+    }
+    if channel_id.is_empty() {
+        channel_id = vd.get("channelId").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    }
+    
+    // Extract duration more efficiently
     let duration = if let Some(length_seconds) = vd.get("lengthSeconds").and_then(|l| l.as_str()) {
         if let Ok(seconds) = length_seconds.parse::<u64>() {
             format!("PT{}M{}S", seconds / 60, seconds % 60)
         } else {
-            "".to_string()
+            String::new()
         }
     } else {
-        "".to_string()
+        String::new()
     };
-    
-    // Format published date
-    let published_at = micro
-        .get("publishDate")
-        .and_then(|p| p.as_str())
-        .unwrap_or("")
-        .to_string();
     
     // Build final video URL
     let final_video_url = if config.video.source == "direct" {
@@ -1142,22 +1459,10 @@ pub async fn get_ytvideo_info(
     };
     
     let response = VideoInfoResponse {
-        title: vd
-            .get("title")
-            .and_then(|t| t.as_str())
-            .map(sanitize_text)
-            .unwrap_or_else(|| "".to_string()),
-        author: vd
-            .get("author")
-            .and_then(|a| a.as_str())
-            .unwrap_or(micro.get("ownerChannelName").and_then(|n| n.as_str()).unwrap_or(""))
-            .to_string(),
+        title: sanitize_text(&title),
+        author,
         subscriber_count,
-        description: vd
-            .get("shortDescription")
-            .and_then(|d| d.as_str())
-            .unwrap_or(vd.get("description").and_then(|d| d.as_str()).unwrap_or(""))
-            .to_string(),
+        description,
         video_id: video_id.clone(),
         channel_custom_url: micro
             .get("ownerProfileUrl")
@@ -1170,17 +1475,18 @@ pub async fn get_ytvideo_info(
         duration,
         published_at,
         likes: if !likes.is_empty() { Some(likes) } else { None },
-        views: vd
-            .get("viewCount")
-            .and_then(|v| v.as_str())
-            .map(|s| s.replace(",", "")),
+        views: if !views.is_empty() { Some(views) } else { None },
         comment_count: if !comm_cnt.is_empty() { 
             Some(comm_cnt) 
         } else { 
             Some(comments.len().to_string()) 
         },
         comments,
-        channel_thumbnail: if !channel_id.is_empty() {
+        channel_thumbnail: if !channel_thumbnail.is_empty() {
+            // If we have a direct thumbnail URL from the API, use it
+            format!("{}/channel_icon/{}", base_trimmed, urlencoding::encode(&channel_thumbnail))
+        } else if !channel_id.is_empty() {
+            // Otherwise use the channel ID
             format!("{}/channel_icon/{}", base_trimmed, channel_id)
         } else {
             "".to_string()

@@ -86,10 +86,32 @@ fn parse_video_renderer(vr: &serde_json::Value, base_trimmed: &str) -> Option<Se
     }
     
     let title = simplify_text(&vr.get("title").unwrap_or(&serde_json::Value::Null));
-    let author = simplify_text(&vr.get("ownerText").unwrap_or(&serde_json::Value::Null));
+    let description = simplify_text(&vr.get("descriptionSnippet").unwrap_or(&serde_json::Value::Null));
     let duration = simplify_text(&vr.get("lengthText").unwrap_or(&serde_json::Value::Null));
+    let views = simplify_text(&vr.get("viewCountText").unwrap_or(&serde_json::Value::Null));
+    let published = simplify_text(&vr.get("publishedTimeText").unwrap_or(&serde_json::Value::Null));
+    let author = simplify_text(&vr.get("ownerText").unwrap_or(&serde_json::Value::Null));
     
-    let thumbnail = format!("{}/thumbnail/{}", base_trimmed, video_id);
+    // Extract thumbnail from the video renderer structure (like Python does)
+    let thumbnail_urls = vr
+        .get("thumbnail")
+        .and_then(|t| t.get("thumbnails"))
+        .and_then(|th| th.as_array())
+        .map(|thumbs| {
+            thumbs
+                .iter()
+                .filter_map(|thumb| thumb.get("url").and_then(|u| u.as_str()))
+                .collect::<Vec<&str>>()
+        })
+        .unwrap_or_default();
+    
+    // Use the last thumbnail (usually the largest one, like Python does)
+    let thumbnail = if !thumbnail_urls.is_empty() {
+        thumbnail_urls.last().unwrap_or(&"").to_string()
+    } else {
+        format!("{}/thumbnail/{}", base_trimmed, video_id)
+    };
+    
     let channel_thumbnail = if !channel_id.is_empty() {
         format!("{}/channel_icon/{}", base_trimmed, channel_id)
     } else {
@@ -105,6 +127,9 @@ fn parse_video_renderer(vr: &serde_json::Value, base_trimmed: &str) -> Option<Se
         thumbnail,
         channel_thumbnail,
         duration: if !duration.is_empty() { Some(duration) } else { None },
+        description: if !description.is_empty() { Some(decode_label(&description)) } else { None },
+        views: if !views.is_empty() { Some(decode_label(&views)) } else { None },
+        published: if !published.is_empty() { Some(decode_label(&published)) } else { None },
     })
 }
 
@@ -171,6 +196,12 @@ pub struct SearchResult {
     pub channel_thumbnail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub views: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -352,7 +383,12 @@ pub async fn get_search_videos(
     }
 
     let query = match query_params.get("query") {
-        Some(q) => q.clone(),
+        Some(q) => {
+            // Decode any HTML entities and properly encode for API usage
+            let decoded_entity = decode_html_entities(q.as_str());
+            let original_query = decoded_entity.as_ref();
+            urlencoding::encode(original_query).to_string()
+        },
         None => {
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "error": "query parameter not specified"
@@ -389,12 +425,12 @@ pub async fn get_search_videos(
 
     let client = Client::new();
     
-    // InnerTube search payload
+    // InnerTube search payload - matches Python script structure exactly
     let payload = serde_json::json!({
         "context": {
             "client": {
                 "clientName": "WEB",
-                "clientVersion": "2.20240101.00.00", // Generic version
+                "clientVersion": "2.20250101", // Match Python script version
             }
         },
         "query": query
@@ -405,12 +441,20 @@ pub async fn get_search_videos(
         innertube_key
     );
 
-    match client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&payload)
-        .send()
-        .await
+    let headers = [
+        ("Content-Type", "application/json"),
+        ("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36"),
+        ("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"),
+        ("X-YouTube-Client-Name", "1"),
+        ("X-YouTube-Client-Version", "2.20250101"),
+    ];
+
+    let mut request_builder = client.post(&url).json(&payload);
+    for (key, value) in &headers {
+        request_builder = request_builder.header(*key, *value);
+    }
+
+    match request_builder.send().await
     {
         Ok(response) => match response.json::<serde_json::Value>().await {
             Ok(json_data) => {

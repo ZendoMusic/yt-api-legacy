@@ -15,6 +15,31 @@ fn base_url(req: &HttpRequest, config: &crate::config::Config) -> String {
     format!("{}://{}/", scheme, host.trim_end_matches('/'))
 }
 
+fn parse_number(text: &str) -> String {
+    let lower_text = text.trim().to_lowercase();
+    let mut multiplier = 1.0;
+    let clean_text = if lower_text.contains('k') {
+        multiplier = 1000.0;
+        lower_text.replace('k', "")
+    } else if lower_text.contains('m') {
+        multiplier = 1000000.0;
+        lower_text.replace('m', "")
+    } else if lower_text.contains('b') {
+        multiplier = 1000000000.0;
+        lower_text.replace('b', "")
+    } else {
+        lower_text
+    };
+    
+    // Extract digits and decimal points
+    let num_str: String = clean_text.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
+    
+    match num_str.parse::<f64>() {
+        Ok(num) => ((num * multiplier) as u64).to_string(),
+        Err(_) => "0".to_string(),
+    }
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct ChannelInfo {
     pub title: String,
@@ -43,284 +68,7 @@ pub struct ChannelVideosResponse {
     pub videos: Vec<ChannelVideo>,
 }
 
-async fn fetch_channel_thumbnail(channel_id: &str, apikey: &str) -> Option<String> {
-    let client = Client::new();
-    let url = format!(
-        "https://www.googleapis.com/youtube/v3/channels?part=snippet&id={}&key={}",
-        channel_id, apikey
-    );
 
-    if let Ok(resp) = client.get(&url).send().await {
-        if let Ok(data) = resp.json::<serde_json::Value>().await {
-            if let Some(items) = data.get("items").and_then(|i| i.as_array()) {
-                if let Some(snippet) = items.get(0).and_then(|i| i.get("snippet")) {
-                    if let Some(url) = snippet
-                        .get("thumbnails")
-                        .and_then(|t| t.get("high"))
-                        .and_then(|h| h.get("url"))
-                        .and_then(|u| u.as_str())
-                    {
-                        return Some(url.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-async fn fetch_channel_videos(
-    channel_id: &str,
-    count: i32,
-    apikey: &str,
-    _config: &crate::config::Config,
-    base: &str,
-) -> (Vec<ChannelVideo>, ChannelInfo) {
-    let client = Client::new();
-
-    fn parse_iso_duration(iso: &str) -> String {
-        let mut hours = 0;
-        let mut minutes = 0;
-        let mut seconds = 0;
-        let mut number = String::new();
-        for ch in iso.chars() {
-            if ch.is_ascii_digit() {
-                number.push(ch);
-            } else {
-                let val = number.parse::<u64>().unwrap_or(0);
-                match ch {
-                    'H' => hours = val,
-                    'M' => minutes = val,
-                    'S' => seconds = val,
-                    _ => {}
-                }
-                number.clear();
-            }
-        }
-        if hours > 0 {
-            format!("{}:{:02}:{:02}", hours, minutes, seconds)
-        } else {
-            format!("{}:{:02}", minutes, seconds)
-        }
-    }
-
-    let channel_url = format!(
-        "https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics,brandingSettings&id={}&key={}",
-        channel_id, apikey
-    );
-
-    let channel_resp = client.get(&channel_url).send().await;
-    let channel_data: serde_json::Value = match channel_resp {
-        Ok(resp) => resp.json().await.unwrap_or_else(|_| serde_json::json!({})),
-        Err(_) => serde_json::json!({}),
-    };
-
-    let channel_info_value = channel_data
-        .get("items")
-        .and_then(|i| i.as_array())
-        .and_then(|arr| arr.get(0))
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    let channel_title = channel_info_value
-        .get("snippet")
-        .and_then(|s| s.get("title"))
-        .and_then(|t| t.as_str())
-        .unwrap_or("Unknown")
-        .to_string();
-
-    let _channel_thumb = fetch_channel_thumbnail(channel_id, apikey)
-        .await
-        .unwrap_or_default();
-
-    let banner = channel_info_value
-        .get("brandingSettings")
-        .and_then(|b| b.get("image"))
-        .and_then(|i| i.get("bannerExternalUrl"))
-        .and_then(|u| u.as_str())
-        .unwrap_or("")
-        .to_string();
-    let banner = if banner.starts_with("//") {
-        format!("https:{}", banner)
-    } else {
-        banner
-    };
-
-    let subscriber_count = channel_info_value
-        .get("statistics")
-        .and_then(|s| s.get("subscriberCount"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("0")
-        .to_string();
-
-    let video_count = channel_info_value
-        .get("statistics")
-        .and_then(|s| s.get("videoCount"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("0")
-        .to_string();
-
-    let channel_info = ChannelInfo {
-        title: channel_title.clone(),
-        description: channel_info_value
-            .get("snippet")
-            .and_then(|s| s.get("description"))
-            .and_then(|d| d.as_str())
-            .unwrap_or("")
-            .to_string(),
-        thumbnail: format!("{}/channel_icon/{}", base.trim_end_matches('/'), channel_id),
-        banner: if !banner.is_empty() {
-            let encoded = urlencoding::encode(&banner);
-            format!("{}/channel_icon/{}", base.trim_end_matches('/'), encoded)
-        } else {
-            "".to_string()
-        },
-        subscriber_count,
-        video_count,
-    };
-
-    let mut videos: Vec<ChannelVideo> = Vec::new();
-    let mut next_page_token: Option<String> = None;
-    let mut total = 0;
-
-    while total < count {
-        let mut videos_url = format!(
-            "https://www.googleapis.com/youtube/v3/search?part=snippet&channelId={}&maxResults=50&type=video&order=date&key={}",
-            channel_id, apikey
-        );
-        if let Some(token) = &next_page_token {
-            videos_url.push_str(&format!("&pageToken={}", token));
-        }
-
-        let videos_resp = match client.get(&videos_url).send().await {
-            Ok(r) => r,
-            Err(_) => break,
-        };
-        let videos_data: serde_json::Value = match videos_resp.json().await {
-            Ok(d) => d,
-            Err(_) => break,
-        };
-
-        let mut video_ids: Vec<String> = Vec::new();
-        if let Some(items) = videos_data.get("items").and_then(|i| i.as_array()) {
-            for item in items {
-                if total >= count {
-                    break;
-                }
-                if let Some(video_id) = item
-                    .get("id")
-                    .and_then(|id| id.get("videoId"))
-                    .and_then(|v| v.as_str())
-                {
-                    video_ids.push(video_id.to_string());
-                }
-            }
-        }
-
-        let mut view_counts: HashMap<String, String> = HashMap::new();
-        let mut durations: HashMap<String, String> = HashMap::new();
-        if !video_ids.is_empty() {
-            let ids = video_ids.join(",");
-            let stats_url = format!(
-                "https://www.googleapis.com/youtube/v3/videos?part=statistics,contentDetails&id={}&key={}",
-                ids, apikey
-            );
-            if let Ok(stats_resp) = client.get(&stats_url).send().await {
-                if let Ok(stats_data) = stats_resp.json::<serde_json::Value>().await {
-                    if let Some(items) = stats_data.get("items").and_then(|i| i.as_array()) {
-                        for item in items {
-                            if let (Some(id), Some(stats)) = (
-                                item.get("id").and_then(|i| i.as_str()),
-                                item.get("statistics"),
-                            ) {
-                                let views = stats
-                                    .get("viewCount")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("0")
-                                    .to_string();
-                                view_counts.insert(id.to_string(), views);
-                            }
-                            if let (Some(id), Some(details)) = (
-                                item.get("id").and_then(|i| i.as_str()),
-                                item.get("contentDetails"),
-                            ) {
-                                let iso = details
-                                    .get("duration")
-                                    .and_then(|d| d.as_str())
-                                    .unwrap_or("");
-                                durations.insert(id.to_string(), parse_iso_duration(iso));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(items) = videos_data.get("items").and_then(|i| i.as_array()) {
-            for item in items {
-                if total >= count {
-                    break;
-                }
-
-                if let (Some(snippet), Some(video_id)) = (
-                    item.get("snippet"),
-                    item.get("id")
-                        .and_then(|id| id.get("videoId"))
-                        .and_then(|v| v.as_str()),
-                ) {
-                    let title = snippet
-                        .get("title")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    let published_at = snippet
-                        .get("publishedAt")
-                        .and_then(|p| p.as_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    let thumbnail =
-                        format!("{}/thumbnail/{}", base.trim_end_matches('/'), video_id);
-
-                    videos.push(ChannelVideo {
-                        title,
-                        author: channel_title.clone(),
-                        video_id: video_id.to_string(),
-                        thumbnail,
-                        channel_thumbnail: format!(
-                            "{}/channel_icon/{}",
-                            base.trim_end_matches('/'),
-                            channel_id
-                        ),
-                        views: view_counts
-                            .get(video_id)
-                            .cloned()
-                            .unwrap_or_else(|| "0".to_string()),
-                        published_at,
-                        duration: durations
-                            .get(video_id)
-                            .cloned()
-                            .unwrap_or_else(|| "0:00".to_string()),
-                    });
-                    total += 1;
-                }
-            }
-        }
-
-        next_page_token = videos_data
-            .get("nextPageToken")
-            .and_then(|t| t.as_str())
-            .map(|s| s.to_string());
-
-        if next_page_token.is_none() {
-            break;
-        }
-    }
-
-    (videos, channel_info)
-}
 
 #[utoipa::path(
     get,
@@ -362,29 +110,20 @@ pub async fn get_author_videos(
         .and_then(|c| c.parse().ok())
         .unwrap_or(config.video.default_count as i32);
 
-    let apikey = config.get_api_key_rotated();
+    // Use InnerTube API key from config
+    let innertube_key = match config.get_innertube_key() {
+        Some(key) => key,
+        None => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Missing innertube_key in config.yml"
+            }));
+        }
+    };
+
     let client = Client::new();
 
-    let search_url = format!(
-        "https://www.googleapis.com/youtube/v3/search?part=snippet&q={}&type=channel&maxResults=1&key={}",
-        urlencoding::encode(&author),
-        apikey
-    );
-
-    let channel_id = match client.get(&search_url).send().await {
-        Ok(resp) => match resp.json::<serde_json::Value>().await {
-            Ok(data) => data
-                .get("items")
-                .and_then(|i| i.as_array())
-                .and_then(|arr| arr.get(0))
-                .and_then(|item| item.get("id"))
-                .and_then(|id| id.get("channelId"))
-                .and_then(|c| c.as_str())
-                .map(|s| s.to_string()),
-            Err(_) => None,
-        },
-        Err(_) => None,
-    };
+    // Resolve handle to channel ID using InnerTube API
+    let channel_id = resolve_handle_to_channel_id(&author, &client, &innertube_key, &base).await;
 
     let channel_id = match channel_id {
         Some(id) => id,
@@ -447,9 +186,17 @@ async fn get_author_videos_by_id_internal(
     config: &crate::config::Config,
     base: &str,
 ) -> HttpResponse {
-    let apikey = config.get_api_key_rotated();
-    let (videos, channel_info) =
-        fetch_channel_videos(channel_id, count, apikey, config, base).await;
+    // Use InnerTube API key from config
+    let innertube_key = match config.get_innertube_key() {
+        Some(key) => key,
+        None => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Missing innertube_key in config.yml"
+            }));
+        }
+    };
+
+    let (videos, channel_info) = fetch_channel_videos_inner_tube(channel_id, count, &innertube_key, base).await;
 
     let response = ChannelVideosResponse {
         channel_info,
@@ -457,6 +204,387 @@ async fn get_author_videos_by_id_internal(
     };
 
     HttpResponse::Ok().json(response)
+}
+
+async fn resolve_handle_to_channel_id(handle: &str, client: &Client, innertube_key: &str, _base: &str) -> Option<String> {
+    let clean_handle = handle.trim().trim_start_matches('@');
+    let url = format!("https://www.youtube.com/youtubei/v1/navigation/resolve_url?key={}&prettyPrint=false", innertube_key);
+    
+    let context = serde_json::json!({
+        "client": {
+            "clientName": "WEB",
+            "clientVersion": "2.20260220.00.00",
+            "hl": "en",
+            "gl": "US"
+        }
+    });
+    
+    let payload = serde_json::json!({
+        "context": context,
+        "url": format!("https://www.youtube.com/@{}", clean_handle),
+        "request": {}
+    });
+    
+    match client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => match resp.json::<serde_json::Value>().await {
+            Ok(data) => {
+                data.get("endpoint")
+                    .and_then(|endpoint| endpoint.get("browseEndpoint"))
+                    .and_then(|browse_endpoint| browse_endpoint.get("browseId"))
+                    .and_then(|browse_id| browse_id.as_str())
+                    .map(|s| s.to_string())
+            },
+            Err(_) => None,
+        },
+        Err(_) => None,
+    }
+}
+
+async fn fetch_channel_videos_inner_tube(
+    channel_id: &str,
+    count: i32,
+    innertube_key: &str,
+    base: &str,
+) -> (Vec<ChannelVideo>, ChannelInfo) {
+    let client = Client::new();
+    
+    let url = format!("https://www.youtube.com/youtubei/v1/browse?key={}&prettyPrint=false", innertube_key);
+    
+    let context = serde_json::json!({
+        "client": {
+            "clientName": "WEB",
+            "clientVersion": "2.20260220.00.00",
+            "hl": "en",
+            "gl": "US"
+        }
+    });
+    
+    let payload = serde_json::json!({
+        "context": context,
+        "browseId": channel_id,
+    });
+    
+    let response = match client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(_) => {
+            return (Vec::new(), ChannelInfo {
+                title: "Unknown".to_string(),
+                description: "".to_string(),
+                thumbnail: "".to_string(),
+                banner: "".to_string(),
+                subscriber_count: "0".to_string(),
+                video_count: "0".to_string(),
+            });
+        }
+    };
+    
+    let data: serde_json::Value = match response.json().await {
+        Ok(json) => json,
+        Err(_) => {
+            return (Vec::new(), ChannelInfo {
+                title: "Unknown".to_string(),
+                description: "".to_string(),
+                thumbnail: "".to_string(),
+                banner: "".to_string(),
+                subscriber_count: "0".to_string(),
+                video_count: "0".to_string(),
+            });
+        }
+    };
+    
+    let channel_info = extract_channel_info(&data, base, channel_id).await;
+    
+    // Find the Videos tab
+    let tabs_option = data
+        .get("contents")
+        .and_then(|c| c.get("twoColumnBrowseResultsRenderer"))
+        .and_then(|r| r.get("tabs"))
+        .and_then(|t| t.as_array());
+    
+    let tabs_array: &Vec<serde_json::Value> = match tabs_option {
+        Some(arr) => arr,
+        None => &Vec::new(),
+    };
+    
+    let mut videos_content = None;
+    for tab in tabs_array {
+        if let Some(tr) = tab.get("tabRenderer") {
+            if let Some(title) = tr.get("title").and_then(|t| t.as_str()) {
+                if title == "Videos" {
+                    videos_content = tr.get("content");
+                    break;
+                }
+            }
+        }
+    }
+    
+    // If no "Videos" tab found, try to find any selected tab
+    if videos_content.is_none() {
+        for tab in tabs_array {
+            if let Some(tr) = tab.get("tabRenderer") {
+                if tr.get("selected").and_then(|s| s.as_bool()).unwrap_or(false) {
+                    videos_content = tr.get("content");
+                    break;
+                }
+            }
+        }
+    }
+    
+    let mut videos = Vec::new();
+    if let Some(content) = videos_content {
+        videos = collect_videos_from_content(content, &channel_info, base, &client, innertube_key).await;
+    }
+    
+    // Limit the number of videos
+    videos.truncate(count as usize);
+    
+    (videos, channel_info)
+}
+
+async fn extract_channel_info(data: &serde_json::Value, base: &str, channel_id: &str) -> ChannelInfo {
+    let metadata = data
+        .get("metadata")
+        .and_then(|m| m.get("channelMetadataRenderer"))
+        .unwrap_or(&serde_json::Value::Null);
+    
+    let title = metadata
+        .get("title")
+        .and_then(|t| t.as_str())
+        .unwrap_or("No title")
+        .to_string();
+    
+    let description = metadata
+        .get("description")
+        .and_then(|d| d.as_str())
+        .unwrap_or("")
+        .to_string();
+    
+    let external_id = metadata
+        .get("externalId")
+        .and_then(|id| id.as_str())
+        .unwrap_or(channel_id);
+    
+    // Extract banner URL
+    let banner_url = data
+        .get("header")
+        .and_then(|h| h.get("pageHeaderRenderer"))
+        .and_then(|ph| ph.get("content"))
+        .and_then(|c| c.get("pageHeaderViewModel"))
+        .and_then(|phvm| phvm.get("banner"))
+        .and_then(|b| b.get("imageBannerViewModel"))
+        .and_then(|ibvm| ibvm.get("image"))
+        .and_then(|img| img.get("sources"))
+        .and_then(|sources| sources.as_array())
+        .and_then(|arr| arr.last())
+        .and_then(|last_source| last_source.get("url"))
+        .and_then(|url| url.as_str())
+        .unwrap_or("");
+    
+    let banner_escaped = if !banner_url.is_empty() {
+        urlencoding::encode(banner_url).to_string()
+    } else {
+        "".to_string()
+    };
+    
+    let channel_icon = format!("{}/channel_icon/{}", base.trim_end_matches('/'), external_id);
+    let banner = if !banner_escaped.is_empty() {
+        format!("{}/channel_icon/{}", base.trim_end_matches('/'), banner_escaped)
+    } else {
+        "".to_string()
+    };
+    
+    // Extract subscriber and video counts
+    let mut subscriber_count = "0".to_string();
+    let mut video_count = "0".to_string();
+    
+    if let Some(header) = data
+        .get("header")
+        .and_then(|h| h.get("pageHeaderRenderer"))
+        .and_then(|ph| ph.get("content"))
+        .and_then(|c| c.get("pageHeaderViewModel"))
+        .and_then(|phvm| phvm.get("metadata"))
+        .and_then(|m| m.get("contentMetadataViewModel"))
+        .and_then(|cmvm| cmvm.get("metadataRows"))
+        .and_then(|mr| mr.as_array())
+    {
+        if header.len() > 1 {
+            if let Some(row) = header.get(1) {
+                if let Some(parts) = row.get("metadataParts").and_then(|mp| mp.as_array()) {
+                    if let Some(sub_part) = parts.first() {
+                        if let Some(content) = sub_part
+                            .get("text")
+                            .and_then(|t| t.get("content"))
+                            .and_then(|c| c.as_str())
+                        {
+                            subscriber_count = parse_number(content);
+                        }
+                    }
+                    
+                    if parts.len() > 1 {
+                        if let Some(video_part) = parts.get(1) {
+                            if let Some(content) = video_part
+                                .get("text")
+                                .and_then(|t| t.get("content"))
+                                .and_then(|c| c.as_str())
+                            {
+                                video_count = parse_number(content);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    ChannelInfo {
+        title,
+        description,
+        thumbnail: channel_icon,
+        banner,
+        subscriber_count,
+        video_count,
+    }
+}
+
+async fn collect_videos_from_content(
+    content: &serde_json::Value,
+    channel_info: &ChannelInfo,
+    base: &str,
+    _client: &Client,
+    _innertube_key: &str,
+) -> Vec<ChannelVideo> {
+    let mut videos = Vec::new();
+    
+    // Process sectionListRenderer
+    if let Some(section_list) = content.get("sectionListRenderer") {
+        if let Some(sections) = section_list.get("contents").and_then(|c| c.as_array()) {
+            for section in sections {
+                if let Some(item_section) = section.get("itemSectionRenderer") {
+                    if let Some(contents) = item_section.get("contents").and_then(|c| c.as_array()) {
+                        for item in contents {
+                            if let Some(grid_video) = item.get("gridVideoRenderer") {
+                                if let Some(video) = process_grid_video_renderer(grid_video, channel_info, base).await {
+                                    videos.push(video);
+                                }
+                            } else if let Some(shelf_renderer) = item.get("shelfRenderer") {
+                                if let Some(horizontal_list) = shelf_renderer
+                                    .get("content")
+                                    .and_then(|c| c.get("horizontalListRenderer"))
+                                    .and_then(|hlr| hlr.get("items"))
+                                    .and_then(|i| i.as_array())
+                                {
+                                    for horiz_item in horizontal_list {
+                                        if let Some(grid_video) = horiz_item.get("gridVideoRenderer") {
+                                            if let Some(video) = process_grid_video_renderer(grid_video, channel_info, base).await {
+                                                videos.push(video);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Process richGridRenderer
+    if let Some(rich_grid) = content.get("richGridRenderer") {
+        if let Some(contents) = rich_grid.get("contents").and_then(|c| c.as_array()) {
+            for item in contents {
+                if let Some(grid_video) = item.get("gridVideoRenderer") {
+                    if let Some(video) = process_grid_video_renderer(grid_video, channel_info, base).await {
+                        videos.push(video);
+                    }
+                }
+            }
+        }
+    }
+    
+    videos
+}
+
+async fn process_grid_video_renderer(
+    vr: &serde_json::Value,
+    channel_info: &ChannelInfo,
+    base: &str,
+) -> Option<ChannelVideo> {
+    let video_id = vr.get("videoId").and_then(|id| id.as_str())?;
+    let title_obj = vr.get("title")?;
+    
+    let title = if let Some(simple_text) = title_obj.get("simpleText").and_then(|t| t.as_str()) {
+        simple_text.to_string()
+    } else if let Some(runs) = title_obj.get("runs").and_then(|r| r.as_array()) {
+        if let Some(first_run) = runs.first() {
+            first_run.get("text").and_then(|t| t.as_str()).unwrap_or("No title").to_string()
+        } else {
+            "No title".to_string()
+        }
+    } else {
+        "No title".to_string()
+    };
+    
+    let views_raw = vr
+        .get("viewCountText")
+        .and_then(|vct| vct.get("simpleText"))
+        .or_else(|| vr.get("shortViewCountText").and_then(|svct| svct.get("simpleText")))
+        .and_then(|st| st.as_str())
+        .unwrap_or("0");
+    
+    let views = parse_number(views_raw);
+    
+    let duration = vr
+        .get("lengthText")
+        .and_then(|lt| lt.get("simpleText"))
+        .or_else(|| {
+            vr.get("thumbnailOverlays")
+                .and_then(|to| to.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|first_overlay| first_overlay.get("thumbnailOverlayTimeStatusRenderer"))
+                .and_then(|totsr| totsr.get("text"))
+                .and_then(|text| text.get("simpleText"))
+        })
+        .and_then(|st| st.as_str())
+        .unwrap_or("0:00")
+        .to_string();
+    
+    // Extract published time text like "2 weeks ago" from the JSON
+    let published_at_raw = vr
+        .get("publishedTimeText")
+        .and_then(|ptt| ptt.get("simpleText"))
+        .and_then(|st| st.as_str())
+        .unwrap_or("");
+    
+    // Convert human-readable time to a standard format or keep as is
+    let published_at = if !published_at_raw.is_empty() {
+        published_at_raw.to_string()
+    } else {
+        "1970-01-01T00:00:00Z".to_string()
+    };
+    
+    Some(ChannelVideo {
+        title,
+        author: channel_info.title.clone(),
+        video_id: video_id.to_string(),
+        thumbnail: format!("{}/thumbnail/{}", base.trim_end_matches('/'), video_id),
+        channel_thumbnail: channel_info.thumbnail.clone(),
+        views,
+        published_at,
+        duration,
+    })
 }
 
 #[utoipa::path(
@@ -472,7 +600,7 @@ async fn get_author_videos_by_id_internal(
 )]
 pub async fn get_channel_thumbnail_api(
     req: HttpRequest,
-    data: web::Data<crate::AppState>,
+    _data: web::Data<crate::AppState>,
 ) -> impl Responder {
     let mut query_params: HashMap<String, String> = HashMap::new();
     for pair in req.query_string().split('&') {
@@ -491,47 +619,14 @@ pub async fn get_channel_thumbnail_api(
         }
     };
 
-    let config = &data.config;
-    let apikey = config.get_api_key_rotated();
-    if apikey.is_empty() {
-        return HttpResponse::Ok().json(serde_json::json!({ "channel_thumbnail": "" }));
-    }
-
-    let client = Client::new();
-    let video_url = format!(
-        "https://www.googleapis.com/youtube/v3/videos?id={}&key={}&part=snippet",
-        video_id, apikey
+    // Return the URL for the channel icon based on the video ID
+    // The actual thumbnail will be fetched by the channel_icon endpoint
+    let channel_thumbnail_url = format!("{}/channel_icon/{}", 
+        base_url(&req, &_data.config).trim_end_matches('/'), 
+        video_id
     );
 
-    let channel_id = match client.get(&video_url).send().await {
-        Ok(resp) => match resp.json::<serde_json::Value>().await {
-            Ok(data) => data
-                .get("items")
-                .and_then(|i| i.as_array())
-                .and_then(|arr| arr.get(0))
-                .and_then(|item| item.get("snippet"))
-                .and_then(|s| s.get("channelId"))
-                .and_then(|c| c.as_str())
-                .map(|s| s.to_string()),
-            Err(_) => None,
-        },
-        Err(_) => None,
-    };
-
-    let channel_id = match channel_id {
-        Some(id) => id,
-        None => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Видео не найдено"
-            }));
-        }
-    };
-
-    let thumb = fetch_channel_thumbnail(&channel_id, apikey)
-        .await
-        .unwrap_or_default();
-
     HttpResponse::Ok().json(serde_json::json!({
-        "channel_thumbnail": thumb
+        "channel_thumbnail": channel_thumbnail_url
     }))
 }
