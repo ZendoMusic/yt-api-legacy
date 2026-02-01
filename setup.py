@@ -71,80 +71,6 @@ def get_fresh_innertube_key(user_agent: str = DEFAULT_UA) -> str | None:
 
 
 # ───────────────────────────────────────────────
-# Download latest yt-dlp nightly build
-# ───────────────────────────────────────────────
-
-def download_yt_dlp_nightly():
-    assets_dir = Path("assets")
-    assets_dir.mkdir(exist_ok=True)
-
-    base_url = "https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/"
-
-    system = platform.system().lower()
-    machine = platform.machine().lower()
-
-    if system == "windows":
-        filename = "yt-dlp.exe"
-        target_path = assets_dir / "yt-dlp.exe"
-    elif system == "linux":
-        if "x86_64" in machine or "amd64" in machine:
-            filename = "yt-dlp_linux"
-        elif "aarch64" in machine or "arm64" in machine:
-            filename = "yt-dlp_linux_aarch64"
-        else:
-            print("Unknown Linux architecture:", machine)
-            print("Please download the correct file manually")
-            return None
-        target_path = assets_dir / "yt-dlp"
-    elif system == "darwin":  # macOS
-        if "arm64" in machine:
-            filename = "yt-dlp_macos_arm64"
-        else:
-            filename = "yt-dlp_macos"
-        target_path = assets_dir / "yt-dlp"
-    else:
-        print(f"Operating system {system!r} is not automatically supported yet.")
-        return None
-
-    url = base_url + filename
-    print(f"→ Downloading {filename} → {url}")
-
-    try:
-        r = requests.get(url, stream=True, timeout=30)
-        if r.status_code != 200:
-            print(f"Error {r.status_code}: failed to download {filename}")
-            print("→ Check if the file exists manually at the link")
-            return None
-
-        # Download with progress
-        total_size = int(r.headers.get("content-length", 0))
-        downloaded = 0
-        chunk_size = 1024 * 128
-
-        with open(target_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=chunk_size):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total_size > 0:
-                        percent = (downloaded / total_size) * 100
-                        print(f"\rDownloaded: {percent:5.1f}%", end="")
-        print("\n→ Download completed")
-
-        # Make executable on Linux/macOS
-        if system != "windows":
-            target_path.chmod(0o755)
-            print(f"→ Executable permissions set: chmod +x {target_path}")
-
-        print(f"→ File saved: {target_path.absolute()}")
-        return str(target_path)
-
-    except Exception as e:
-        print("Error while downloading yt-dlp:", e)
-        return None
-
-
-# ───────────────────────────────────────────────
 # User input functions
 # ───────────────────────────────────────────────
 
@@ -186,17 +112,7 @@ def ask_for_api_keys() -> list[str]:
 
 
 def main():
-    print("=== Config.yml Generator + yt-dlp downloader ===\n")
-
-    # Download yt-dlp
-    print("Checking/downloading latest yt-dlp nightly build...\n")
-    yt_dlp_path = download_yt_dlp_nightly()
-    if yt_dlp_path:
-        print(f"yt-dlp successfully placed at: {yt_dlp_path}\n")
-    else:
-        print("Failed to automatically download yt-dlp.")
-        print("You can download it manually from:")
-        print("https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest\n")
+    print("=== Config.yml Generator ===\n")
 
     port = ask_for_port()
     main_url = ask_for_main_url()
@@ -225,8 +141,8 @@ def main():
             },
         },
         "video": {
-            "source": "direct",
-            "use_cookies": True,
+            "source": "innertube",
+            "use_cookies": False,
             "default_quality": "360",
             "available_qualities": ["144", "240", "360", "480", "720", "1080", "1440", "2160"],
             "default_count": 50,

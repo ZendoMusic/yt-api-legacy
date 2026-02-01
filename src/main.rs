@@ -44,6 +44,7 @@ use routes::auth::{AuthConfig, TokenStore};
         routes::video::direct_url,
         routes::video::direct_audio_url,
         routes::video::get_direct_video_url,
+        routes::video::hls_manifest_url,
         routes::video::video_proxy,
         routes::video::download_video,
         routes::additional::get_recommendations,
@@ -81,6 +82,7 @@ use routes::auth::{AuthConfig, TokenStore};
             routes::video::Comment,
             routes::video::RelatedVideo,
             routes::video::DirectUrlResponse,
+            routes::video::HlsManifestUrlResponse,
             routes::additional::RecommendationItem,
             routes::additional::HistoryItem,
             routes::additional::SubscriptionsResponse,
@@ -289,6 +291,10 @@ async fn main() -> std::io::Result<()> {
                 web::resource("/direct_audio_url")
                     .route(web::get().to(routes::video::direct_audio_url))
                     .route(web::head().to(routes::video::direct_audio_url)),
+            )
+            .service(
+                web::resource("/hls_manifest_url")
+                    .route(web::get().to(routes::video::hls_manifest_url)),
             )
             .route(
                 "/get-direct-video-url.php",
