@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -613,7 +614,16 @@ lazy_static! {
 
 const CACHE_DURATION: u64 = 3600;
 
-
+fn yt_dlp_binary() -> String {
+    if cfg!(target_os = "windows") {
+        if Path::new("assets/yt-dlp.exe").exists() {
+            return "assets/yt-dlp.exe".to_string();
+        }
+    } else if Path::new("assets/yt-dlp").exists() {
+        return "assets/yt-dlp".to_string();
+    }
+    "yt-dlp".to_string()
+}
 
 fn sanitize_text(input: &str) -> String {
     let decoded = urlencoding::decode(input)
@@ -694,15 +704,104 @@ fn collect_cookie_paths() -> Vec<PathBuf> {
     paths
 }
 
-// Placeholder function to replace resolve_direct_stream_url
-// This would need to be reimplemented with an alternative approach
 async fn resolve_direct_stream_url(
     video_id: &str,
     quality: Option<&str>,
     audio_only: bool,
     config: &crate::config::Config,
 ) -> Result<String, String> {
-    Err("Direct stream resolution via yt-dlp has been removed".to_string())
+    let video_id = video_id.to_string();
+    let quality = quality
+        .map(|q| q.to_string())
+        .unwrap_or_else(|| config.video.default_quality.clone());
+    let use_cookies = config.video.use_cookies;
+    let yt_dlp = yt_dlp_binary();
+    let mut cookie_paths = Vec::new();
+    if use_cookies {
+        cookie_paths = collect_cookie_paths();
+        let names: Vec<String> = cookie_paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        if names.is_empty() {
+            crate::log::info!("Cookies enabled; found 0 files");
+        } else {
+            crate::log::info!(
+                "Cookies enabled; found {} files: {}",
+                names.len(),
+                names.join(", ")
+            );
+        }
+    }
+
+    task::spawn_blocking(move || {
+        let url = format!("https://www.youtube.com/watch?v={}", video_id);
+        let format_selector = if audio_only {
+            "bestaudio/best".to_string()
+        } else {
+            format!("best[height<={}][ext=mp4]/best[ext=mp4]/best", quality)
+        };
+
+        let mut attempts: Vec<Option<PathBuf>> = Vec::new();
+        for p in cookie_paths {
+            attempts.push(Some(p));
+        }
+        attempts.push(None);
+
+        let mut last_err = None;
+        for cookie in attempts {
+            let mut cmd = Command::new(&yt_dlp);
+            cmd.arg("-f")
+                .arg(&format_selector)
+                .arg("--get-url")
+                .arg(&url);
+
+            if let Some(ref path) = cookie {
+                cmd.arg("--cookies").arg(path);
+            }
+
+            match cmd.output() {
+                Ok(output) if output.status.success() => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    if let Some(line) = stdout.lines().find(|l| !l.trim().is_empty()) {
+                        return Ok(line.to_string());
+                    }
+                    last_err = Some("yt-dlp returned empty output".to_string());
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let msg = if let Some(ref path) = cookie {
+                        format!(
+                            "yt-dlp failed with cookies {}: status {} stderr {}",
+                            path.display(),
+                            output.status,
+                            stderr
+                        )
+                    } else {
+                        format!(
+                            "yt-dlp failed without cookies: status {} stderr {}",
+                            output.status, stderr
+                        )
+                    };
+                    crate::log::info!("{}", msg);
+                    last_err = Some(msg);
+                }
+                Err(e) => {
+                    let msg = if let Some(ref path) = cookie {
+                        format!("yt-dlp exec error with cookies {}: {}", path.display(), e)
+                    } else {
+                        format!("yt-dlp exec error: {}", e)
+                    };
+                    crate::log::info!("{}", msg);
+                    last_err = Some(msg);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| "yt-dlp failed for all attempts".to_string()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 async fn proxy_stream_response(
@@ -1354,7 +1453,6 @@ pub async fn get_ytvideo_info(
             base_trimmed, video_id
         )
     } else {
-        // For innertube source, we don't build direct URLs since yt-dlp functionality has been removed
         "".to_string()
     };
     
@@ -1691,7 +1789,7 @@ pub async fn get_direct_video_url(
     match resolve_direct_stream_url(&video_id, quality, false, &data.config).await {
         Ok(url) => HttpResponse::Ok().json(DirectUrlResponse { video_url: url }),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-            "error": "Video streaming via yt-dlp has been disabled",
+            "error": "Failed to resolve direct url",
             "details": e
         })),
     }
@@ -1762,7 +1860,7 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
             Ok(url) => url,
             Err(e) => {
                 return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Video streaming via yt-dlp has been disabled",
+                    "error": "Failed to resolve video url",
                     "details": e
                 }));
             }
@@ -1884,7 +1982,7 @@ pub async fn direct_audio_url(
         Ok(url) => url,
         Err(e) => {
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Audio streaming via yt-dlp has been disabled",
+                "error": "Failed to resolve audio url",
                 "details": e
             }));
         }
@@ -2000,7 +2098,7 @@ pub async fn download_video(req: HttpRequest, data: web::Data<crate::AppState>) 
         Ok(url) => url,
         Err(e) => {
             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Video streaming via yt-dlp has been disabled",
+                "error": "Failed to resolve video url",
                 "details": e
             }));
         }
