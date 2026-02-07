@@ -1722,7 +1722,7 @@ pub async fn get_related_videos(
     let mut result_videos: Vec<RelatedVideo> = Vec::new();
     for video in paginated_videos {
         let thumbnail = format!("{}/thumbnail/{}", base_trimmed, video.video_id);
-        let color = dominant_color_from_url(&format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", video.video_id)).await;
+        let color = dominant_color_from_url(&format!("{}/thumbnail/{}", base_trimmed, video.video_id)).await;
         let channel_thumbnail = format!("{}/channel_icon/{}", base_trimmed, video.video_id);
         
         let video_url = format!("{}/get-ytvideo-info.php?video_id={}&quality={}", 
@@ -2311,21 +2311,8 @@ fn extract_video_from_lockup(lockup: &serde_json::Value) -> Option<RelatedVideoI
         }
     }
     
-    // Extract thumbnail
-    let mut thumbnail = String::new();
-    if let Some(content_image) = lockup.get("contentImage").and_then(|ci| ci.as_object()) {
-        if let Some(thumbnail_vm) = content_image.get("thumbnailViewModel").and_then(|tvm| tvm.as_object()) {
-            if let Some(image) = thumbnail_vm.get("image").and_then(|i| i.as_object()) {
-                if let Some(sources) = image.get("sources").and_then(|s| s.as_array()) {
-                    if let Some(last_source) = sources.last() {
-                        if let Some(url) = last_source.as_object().and_then(|s| s.get("url")).and_then(|u| u.as_str()) {
-                            thumbnail = url.to_string();
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // We don't extract direct thumbnail URLs, instead we generate local ones in the main function
+    let thumbnail = String::new();
     
     Some(RelatedVideoInfo {
         video_id,

@@ -92,25 +92,8 @@ fn parse_video_renderer(vr: &serde_json::Value, base_trimmed: &str) -> Option<Se
     let published = simplify_text(&vr.get("publishedTimeText").unwrap_or(&serde_json::Value::Null));
     let author = simplify_text(&vr.get("ownerText").unwrap_or(&serde_json::Value::Null));
     
-    // Extract thumbnail from the video renderer structure (like Python does)
-    let thumbnail_urls = vr
-        .get("thumbnail")
-        .and_then(|t| t.get("thumbnails"))
-        .and_then(|th| th.as_array())
-        .map(|thumbs| {
-            thumbs
-                .iter()
-                .filter_map(|thumb| thumb.get("url").and_then(|u| u.as_str()))
-                .collect::<Vec<&str>>()
-        })
-        .unwrap_or_default();
-    
-    // Use the last thumbnail (usually the largest one, like Python does)
-    let thumbnail = if !thumbnail_urls.is_empty() {
-        thumbnail_urls.last().unwrap_or(&"").to_string()
-    } else {
-        format!("{}/thumbnail/{}", base_trimmed, video_id)
-    };
+    // Use local thumbnail endpoint like in get_top_videos.php
+    let thumbnail = format!("{}/thumbnail/{}", base_trimmed, video_id);
     
     let channel_thumbnail = if !channel_id.is_empty() {
         format!("{}/channel_icon/{}", base_trimmed, channel_id)
