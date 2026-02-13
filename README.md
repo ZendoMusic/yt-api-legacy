@@ -1,5 +1,5 @@
 <p>
-  <img src="assets/logo.png" alt="Logo" width="10%">
+  <img src="assets/logo.png" alt="Logo" width="25%">
 </p>
 
 # YouTube API Legacy
