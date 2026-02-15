@@ -55,8 +55,7 @@ fn find_video_renderers(obj: &serde_json::Value, out: &mut Vec<serde_json::Value
 
 fn parse_video_renderer(vr: &serde_json::Value, base_trimmed: &str) -> Option<SearchResult> {
     let video_id = vr.get("videoId").and_then(|v| v.as_str())?.to_string();
-    
-    // Extract channel ID from ownerText
+
     let mut channel_id = String::new();
     if let Some(owner_runs) = vr
         .get("ownerText")
@@ -75,8 +74,7 @@ fn parse_video_renderer(vr: &serde_json::Value, base_trimmed: &str) -> Option<Se
             }
         }
     }
-    
-    // Fallback channel ID extraction
+
     if channel_id.is_empty() {
         channel_id = vr
             .get("channelId")
@@ -91,8 +89,7 @@ fn parse_video_renderer(vr: &serde_json::Value, base_trimmed: &str) -> Option<Se
     let views = simplify_text(&vr.get("viewCountText").unwrap_or(&serde_json::Value::Null));
     let published = simplify_text(&vr.get("publishedTimeText").unwrap_or(&serde_json::Value::Null));
     let author = simplify_text(&vr.get("ownerText").unwrap_or(&serde_json::Value::Null));
-    
-    // Use local thumbnail endpoint like in get_top_videos.php
+
     let thumbnail = format!("{}/thumbnail/{}", base_trimmed, video_id);
     
     let channel_thumbnail = if !channel_id.is_empty() {
@@ -219,8 +216,6 @@ pub struct PlaylistResponse {
     pub playlist_info: PlaylistInfo,
     pub videos: Vec<PlaylistVideo>,
 }
-
-// Removed get_channel_thumbnail function as we now generate channel thumbnails locally
 
 #[utoipa::path(
     get,
@@ -359,18 +354,20 @@ pub async fn get_search_videos(
 
     let mut query_params: HashMap<String, String> = HashMap::new();
     for pair in req.query_string().split('&') {
-        let mut parts = pair.split('=');
-        if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
-            query_params.insert(key.to_string(), value.to_string());
+        if let Some(eq_pos) = pair.find('=') {
+            let key = &pair[..eq_pos];
+            let value = &pair[eq_pos + 1..];
+            let decoded_value = urlencoding::decode(value)
+                .unwrap_or(std::borrow::Cow::Borrowed(value))
+                .replace('+', " ");
+            query_params.insert(key.to_string(), decoded_value);
         }
     }
 
     let query = match query_params.get("query") {
         Some(q) => {
-            // Decode any HTML entities and properly encode for API usage
-            let decoded_entity = decode_html_entities(q.as_str());
-            let original_query = decoded_entity.as_ref();
-            urlencoding::encode(original_query).to_string()
+            let decoded_entity = decode_html_entities(q);
+            decoded_entity.to_string()
         },
         None => {
             return HttpResponse::BadRequest().json(serde_json::json!({
@@ -396,7 +393,6 @@ pub async fn get_search_videos(
         }));
     }
 
-    // Use InnerTube API key from config
     let innertube_key = match config.get_innertube_key() {
         Some(key) => key,
         None => {
@@ -407,13 +403,14 @@ pub async fn get_search_videos(
     };
 
     let client = Client::new();
-    
-    // InnerTube search payload - matches Python script structure exactly
+
     let payload = serde_json::json!({
         "context": {
             "client": {
                 "clientName": "WEB",
-                "clientVersion": "2.20250101", // Match Python script version
+                "clientVersion": "2.20250101",
+                "hl": "ru",
+                "gl": "RU"
             }
         },
         "query": query
@@ -442,12 +439,8 @@ pub async fn get_search_videos(
         Ok(response) => match response.json::<serde_json::Value>().await {
             Ok(json_data) => {
                 let mut search_results: Vec<SearchResult> = Vec::new();
-                
-                // Extract video renderers from the response
                 let mut video_renderers = Vec::new();
                 find_video_renderers(&json_data, &mut video_renderers);
-                
-                // Parse video results
                 for vr in video_renderers.iter().take(count) {
                     if let Some(result) = parse_video_renderer(vr, base_trimmed) {
                         search_results.push(result);
