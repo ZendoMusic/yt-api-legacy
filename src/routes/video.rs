@@ -1005,6 +1005,107 @@ fn stream_ffmpeg_merged_response(video_url: &str, audio_url: &str) -> HttpRespon
         .streaming(stream)
 }
 
+/// Converts video to specified codec - full streaming for both codecs
+fn stream_converted_video(
+    source_url: &str,
+    user_agent: &str,
+    _video_id: &str,
+    codec: &str,
+) -> HttpResponse {
+    let source_url = source_url.to_string();
+    let ua = user_agent.to_string();
+    let codec_str = codec.to_string();
+    let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+
+    std::thread::spawn(move || {
+        // Build FFmpeg command - HTTP input with headers, pipe output
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args([
+            "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_at_eof", "1",
+            "-reconnect_delay_max", "10",
+            "-user_agent", &ua,
+            "-headers", "Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com\r\n",
+            "-i", &source_url,
+        ]);
+
+        if codec_str == "mpeg4" {
+            // MPEG-4 Visual conversion
+            cmd.args([
+                "-c:v", "mpeg4", "-b:v", "501k", "-c:a", "copy",
+                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                "-f", "mp4", "pipe:1",
+            ]);
+        } else {
+            // H.263 conversion - pipe output
+            cmd.args([
+                "-c:v", "h263", "-vf", "scale=352:288",
+                "-c:a", "libopencore_amrnb", "-ar", "8000", "-ac", "1",
+				"-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                "-f", "3gp", "pipe:1",
+            ]);
+        }
+
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.blocking_send(Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("FFmpeg failed to start: {}", e)
+                )));
+                return;
+            }
+        };
+
+        // Read converted output from FFmpeg stdout and stream directly
+        if let Some(mut stdout) = child.stdout.take() {
+            let mut out_buffer = [0u8; 65536];
+            loop {
+                match stdout.read(&mut out_buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.blocking_send(Ok(Bytes::copy_from_slice(&out_buffer[..n]))).is_err() {
+                            let _ = child.kill();
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.blocking_send(Err(e));
+                        let _ = child.kill();
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Check FFmpeg exit status
+        if let Ok(exit_status) = child.wait() {
+            if !exit_status.success() {
+                if let Some(mut stderr) = child.stderr.take() {
+                    let mut err_buf = Vec::new();
+                    if stderr.read_to_end(&mut err_buf).is_ok() {
+                        let err_msg = String::from_utf8_lossy(&err_buf).to_string();
+                        log::error!("FFmpeg conversion failed: {}", err_msg);
+                    }
+                }
+            }
+        }
+    });
+
+    let mime_type = if codec == "mpeg4" { "video/mp4" } else { "video/3gpp" };
+    let stream = ReceiverStream::new(rx).map(|r| r.map(web::Bytes::from).map_err(actix_web::error::ErrorInternalServerError));
+    HttpResponse::Ok()
+        .insert_header((CONTENT_TYPE, HeaderValue::from_str(mime_type).unwrap()))
+        .insert_header(("Cache-Control", "public, max-age=3600"))
+        .streaming(stream)
+}
+
 async fn resolve_direct_stream_url(
     video_id: &str,
     quality: Option<&str>,
@@ -2102,11 +2203,12 @@ pub async fn get_direct_video_url(
     params(
         ("video_id" = String, Query, description = "YouTube video ID"),
         ("quality" = Option<String>, Query, description = "Preferred quality"),
-        ("proxy" = Option<String>, Query, description = "Pass-through proxy (true/false)")
+        ("proxy" = Option<String>, Query, description = "Pass-through proxy (true/false)"),
+        ("codec" = Option<String>, Query, description = "Video codec for optional conversion: mpeg4 or h263. If passed, quality will be 360p")
     ),
     responses(
         (status = 200, description = "Video stream"),
-        (status = 400, description = "Missing video_id")
+        (status = 400, description = "Missing video_id or invalid codec")
     )
 )]
 pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> impl Responder {
@@ -2122,10 +2224,40 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
         Some(id) => id.clone(),
         None => {
             return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "ID параметр обязателен"
+                "error": "video_id parameter is required"
             }));
         }
     };
+
+    // Check for codec parameter for conversion
+    let codec = query_params.get("codec").map(|c| c.as_str());
+
+    // If codec is specified, perform conversion
+	if let Some(codec_str) = codec {
+		// Validate codec
+		if codec_str != "mpeg4" && codec_str != "h263" {
+			return HttpResponse::BadRequest().json(serde_json::json!({
+				"error": "Unsupported codec",
+				"details": format!("Codec '{}' is not supported. Available: mpeg4, h263", codec_str),
+				"supported_codecs": ["mpeg4", "h263"]
+			}));
+		}
+
+		// Get direct video URL for conversion - always use 360 quality for conversion
+		let direct_url = match resolve_direct_stream_url(&video_id, Some("360"), false, &data.config).await {
+			Ok(url) => url,
+			Err(e) => {
+				return HttpResponse::InternalServerError().json(serde_json::json!({
+					"error": "Failed to resolve video url for conversion",
+					"details": e
+				}));
+			}
+		};
+
+		// Convert and stream
+		let user_agent = data.config.get_innertube_user_agent();
+		return stream_converted_video(&direct_url, &user_agent, &video_id, codec_str);
+	}
 
     // Check if we should return HLS manifest URL instead of direct stream URL
     let hls_only = query_params.get("hls").map(|v| v == "true").unwrap_or(false);
@@ -2939,6 +3071,19 @@ fn stream_hls_to_mp4_response(
         .map(|r| r.map(web::Bytes::from).map_err(actix_web::error::ErrorInternalServerError));
     HttpResponse::Ok()
         .insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")))
+        .insert_header(("Cache-Control", "public, max-age=3600"))
+        .streaming(stream)
+}
+
+/// Streams FFmpeg conversion output (for codec=mpeg4/h263)
+fn stream_ffmpeg_response(
+    rx: tokio::sync::mpsc::Receiver<Result<Bytes, std::io::Error>>,
+    mime_type: &str,
+) -> HttpResponse {
+    let stream = ReceiverStream::new(rx)
+        .map(|r| r.map(web::Bytes::from).map_err(actix_web::error::ErrorInternalServerError));
+    HttpResponse::Ok()
+        .insert_header((CONTENT_TYPE, HeaderValue::from_str(mime_type).unwrap()))
         .insert_header(("Cache-Control", "public, max-age=3600"))
         .streaming(stream)
 }
