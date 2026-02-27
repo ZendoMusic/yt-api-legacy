@@ -32,16 +32,96 @@ impl Default for ApiKeysConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
+pub struct InnertubeClientConfig {
+    #[serde(default = "default_client_name")]
+    #[serde(rename = "client_name")]
+    pub client_name: String,
+    #[serde(default = "default_client_version")]
+    #[serde(rename = "client_version")]
+    pub client_version: String,
+    #[serde(default = "default_device_make")]
+    #[serde(rename = "device_make")]
+    pub device_make: String,
+    #[serde(default = "default_device_model")]
+    #[serde(rename = "device_model")]
+    pub device_model: String,
+    #[serde(default = "default_os_name")]
+    #[serde(rename = "os_name")]
+    pub os_name: String,
+    #[serde(default = "default_os_version")]
+    #[serde(rename = "os_version")]
+    pub os_version: String,
+}
+
+fn default_client_name() -> String {
+    "IOS".to_string()
+}
+fn default_client_version() -> String {
+    "20.49.6".to_string()
+}
+fn default_device_make() -> String {
+    "Apple".to_string()
+}
+fn default_device_model() -> String {
+    "iPhone16,2".to_string()
+}
+fn default_os_name() -> String {
+    "iOS".to_string()
+}
+fn default_os_version() -> String {
+    "18.0".to_string()
+}
+
+impl Default for InnertubeClientConfig {
+    fn default() -> Self {
+        Self {
+            client_name: default_client_name(),
+            client_version: default_client_version(),
+            device_make: default_device_make(),
+            device_model: default_device_model(),
+            os_name: default_os_name(),
+            os_version: default_os_version(),
+        }
+    }
+}
+
+impl InnertubeClientConfig {
+    /// Объект context.client для запроса к youtubei/v1/player (camelCase ключи).
+    pub fn to_player_context_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "clientName": self.client_name,
+            "clientVersion": self.client_version,
+            "deviceMake": self.device_make,
+            "deviceModel": self.device_model,
+            "osName": self.os_name,
+            "osVersion": self.os_version,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
 pub struct InnertubeConfig {
     #[serde(default)]
     pub key: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "user_agent")]
+    pub user_agent: Option<String>,
+    #[serde(default)]
+    pub client: Option<InnertubeClientConfig>,
 }
 
 impl Default for InnertubeConfig {
     fn default() -> Self {
-        Self { key: None }
+        Self {
+            key: None,
+            user_agent: None,
+            client: None,
+        }
     }
 }
+
+pub const DEFAULT_INNERTUBE_USER_AGENT: &str =
+    "com.google.ios.youtube/19.16.3 (iPhone16,2; U; CPU iOS 18_0 like Mac OS X)";
 
 #[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
 pub struct OAuthConfig {
@@ -274,5 +354,24 @@ impl Config {
             .as_deref()
             .map(|k| k.trim())
             .filter(|k| !k.is_empty())
+    }
+
+    pub fn get_innertube_user_agent(&self) -> String {
+        self.api
+            .innertube
+            .user_agent
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_INNERTUBE_USER_AGENT)
+            .to_string()
+    }
+
+    pub fn get_innertube_player_client(&self) -> InnertubeClientConfig {
+        self.api
+            .innertube
+            .client
+            .clone()
+            .unwrap_or_default()
     }
 }
