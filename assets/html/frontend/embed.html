@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video</title>
+  <link rel="stylesheet" href="/assets/embed/styles.css">
+  <script src="/assets/embed/script.js" defer></script>
+</head>
+<body>
+  <div class="video-container paused" data-volume-level="high">
+    <img class="thumbnail-img">
+    <div class="video-controls-container">
+      <div class="timeline-container">
+        <div class="timeline">
+          <img class="preview-img">
+          <div class="thumb-indicator"></div>
+        </div>
+      </div>
+      <div class="controls">
+        <button class="play-pause-btn">
+          <img class="play-icon" src="/assets/images/play.png" alt="Play">
+          <img class="pause-icon" src="/assets/images/pause.png" alt="Pause">
+        </button>
+        <div class="volume-container">
+          <button class="mute-btn">
+            <img class="volume-high-icon" src="/assets/images/volume_full.png" alt="Volume high">
+            <img class="volume-muted-icon" src="/assets/images/volume_none.png" alt="Muted">
+          </button>
+        </div>
+        <div class="duration-container">
+          <div class="current-time">0:00</div>
+          /
+          <div class="total-time"></div>
+        </div>
+        <button class="speed-btn wide-btn">1x</button>
+        <button class="mini-player-btn">
+          <img src="/assets/images/miniplayer.png" alt="Mini player">
+        </button>
+        <button class="full-screen-btn">
+          <img class="open" src="/assets/images/fullscreen.png" alt="Enter fullscreen">
+          <img class="close" src="/assets/images/un_fullscreen.png" alt="Exit fullscreen">
+        </button>
+      </div>
+    </div>
+    <video src="{{VIDEO_SRC}}" poster="{{POSTER}}"></video>
+  </div>
+</body>
+</html>

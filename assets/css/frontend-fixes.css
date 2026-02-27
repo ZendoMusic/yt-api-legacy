@@ -1,0 +1,97 @@
+/* Guide (sidebar) toggle: hidden when body has class guide-closed */
+body.guide-closed #guide {
+    display: none !important;
+}
+
+/* Remove min-height from channel/results body */
+.branded-page-v2-body {
+    min-height: 0;
+}
+
+/* Search results only: thumbnails — no fixed width/height */
+.search .yt-lockup-thumbnail .yt-thumb-clip img,
+.search .yt-lockup-thumbnail .yt-thumb-185 .yt-thumb-clip img {
+    object-fit: cover;
+}
+
+/* Related videos: only on watch page */
+#page.watch #watch-related .yt-uix-simple-thumb-wrap.yt-uix-simple-thumb-related {
+    position: relative;
+    overflow: hidden;
+}
+
+#page.watch #watch-related .yt-uix-simple-thumb-wrap.yt-uix-simple-thumb-related img {
+    object-fit: cover;
+}
+
+/* Search: thumb wrap/img — no fixed sizes */
+.search .yt-lockup-thumbnail .yt-uix-simple-thumb-wrap img,
+.search .yt-lockup-thumbnail .yt-uix-simple-thumb-related img {
+    object-fit: cover;
+}
+
+/* Comment author icons (like yt2014) */
+.comment-item {
+    padding: 12px 0;
+    border-bottom: 1px solid #e5e5e5;
+    overflow: hidden;
+}
+
+.comment-author-thumb-link {
+    text-decoration: none;
+}
+
+.comment-author-thumb {
+    float: left;
+    margin-right: 12px;
+}
+
+.comment-author-thumb img {
+    width: 48px;
+    height: 48px;
+    display: block;
+    object-fit: cover;
+}
+
+.comment-body {
+    overflow: hidden;
+}
+
+.comment-header {
+    margin-bottom: 4px;
+    font-size: 13px;
+}
+
+.comment-author {
+    font-weight: bold;
+    color: #167ac6;
+    text-decoration: none;
+}
+
+.comment-time {
+    color: #777;
+    margin-left: 8px;
+}
+
+.comment-text {
+    font-size: 13px;
+    line-height: 1.4;
+    color: #333;
+}
+
+/* Channel: show all video rows (like yt2014), not just first row */
+#c4-shelves-container .yt-uix-shelfslider-body {
+    overflow: visible !important;
+    height: auto !important;
+}
+
+#c4-shelves-container .yt-uix-shelfslider-list {
+    display: block;
+    clear: both;
+}
+
+#c4-shelves-container .yt-uix-shelfslider-list:after {
+    content: "";
+    display: table;
+    clear: both;
+}
