@@ -8,7 +8,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::routes::auth::AuthConfig;
+use crate::routes::auth::{AuthConfig, TokenStore};
 use crate::routes::oauth::refresh_access_token;
 use std::fs;
 fn base_url(req: &HttpRequest, config: &crate::config::Config) -> String {
@@ -568,6 +568,89 @@ fn extract_history_data_with_continuation(
     (videos, continuation)
 }
 
+/// Fetches watch history for a refresh token. Returns empty vec on any error.
+pub async fn fetch_history_for_token(
+    refresh_token: &str,
+    auth_config: &AuthConfig,
+    config: &crate::config::Config,
+    base_trimmed: &str,
+    count: usize,
+) -> Vec<HistoryItem> {
+    let access_token = match refresh_access_token(refresh_token, auth_config).await {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let mut videos: Vec<HistoryItem> = Vec::new();
+    let mut continuation: Option<String> = None;
+
+    while videos.len() < count {
+        let page = fetch_history_page(&access_token, continuation.clone(), config).await;
+        if page.is_none() {
+            break;
+        }
+        let (mut page_items, next) = extract_history_data_with_continuation(
+            page.unwrap(),
+            count.saturating_sub(videos.len()),
+            base_trimmed,
+        );
+        videos.append(&mut page_items);
+        continuation = match next {
+            Some(c) => Some(c),
+            None => break,
+        };
+    }
+
+    videos
+}
+
+/// Fetches personalized recommendations for a refresh token. Returns None on any error.
+pub async fn fetch_recommendations_for_token(
+    refresh_token: &str,
+    auth_config: &AuthConfig,
+    config: &crate::config::Config,
+    base_trimmed: &str,
+    count: usize,
+) -> Option<Vec<RecommendationItem>> {
+    let access_token = refresh_access_token(refresh_token, auth_config)
+        .await
+        .ok()?;
+    let api_key = config.get_innertube_key()?;
+    let client = Client::new();
+    let payload = serde_json::json!({
+        "context": {
+            "client": {
+                "hl": "en",
+                "gl": "US",
+                "deviceMake": "Samsung",
+                "deviceModel": "SmartTV",
+                "userAgent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/538.1",
+                "clientName": "TVHTML5",
+                "clientVersion": "7.20250209.19.00",
+                "osName": "Tizen",
+                "osVersion": "5.0",
+                "platform": "TV",
+                "clientFormFactor": "UNKNOWN_FORM_FACTOR",
+                "screenPixelDensity": 1
+            }
+        },
+        "browseId": "FEwhat_to_watch"
+    });
+    let url = format!("https://www.youtube.com/youtubei/v1/browse?key={}", api_key);
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .json(&payload)
+        .send()
+        .await
+        .ok()?;
+    let json_data: serde_json::Value = response.json().await.ok()?;
+    let mut recommendations = parse_recommendations(&json_data, count);
+    for item in &mut recommendations {
+        item.thumbnail = format!("{}/thumbnail/{}", base_trimmed, item.video_id);
+    }
+    Some(recommendations)
+}
+
 #[utoipa::path(
     get,
     path = "/get_recommendations.php",
@@ -609,78 +692,109 @@ pub async fn get_recommendations(
         .and_then(|c| c.parse().ok())
         .unwrap_or(data.config.video.default_count as usize);
 
-    let access_token = match refresh_access_token(&refresh_token, &auth_config).await {
-        Ok(t) => t,
-        Err(e) => {
-            return HttpResponse::Unauthorized().json(serde_json::json!({
-                "error": "Invalid refresh token",
-                "details": e
-            }));
-        }
-    };
+    match fetch_recommendations_for_token(
+        &refresh_token,
+        &auth_config,
+        &data.config,
+        base_trimmed,
+        count,
+    )
+    .await
+    {
+        Some(recommendations) => HttpResponse::Ok().json(recommendations),
+        None => HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "Failed to get recommendations"
+        })),
+    }
+}
 
+fn parse_subscriptions_from_browse(json_data: &serde_json::Value, base_trimmed: &str) -> Vec<SubscriptionItem> {
+    let mut subs = Vec::new();
+    if let Some(tabs) = json_data
+        .pointer("/contents/tvBrowseRenderer/content/tvSecondaryNavRenderer/sections/0/tvSecondaryNavSectionRenderer/tabs")
+        .and_then(|t| t.as_array())
+    {
+        for tab in tabs {
+            if let Some(renderer) = tab.get("tabRenderer") {
+                let username = renderer.get("title").and_then(|t| t.as_str()).unwrap_or("Unknown");
+                if username.eq_ignore_ascii_case("all") {
+                    continue;
+                }
+                let thumb_url = renderer
+                    .get("thumbnail")
+                    .and_then(|t| t.get("thumbnails"))
+                    .and_then(|th| th.as_array())
+                    .and_then(|arr| arr.last())
+                    .and_then(|v| v.get("url"))
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("");
+                let channel_id = renderer
+                    .get("endpoint")
+                    .and_then(|e| e.get("browseEndpoint"))
+                    .and_then(|b| b.get("browseId"))
+                    .and_then(|b| b.as_str())
+                    .unwrap_or("unknown");
+
+                let mut thumb_url = thumb_url.to_string();
+                if thumb_url.starts_with("//") {
+                    thumb_url = format!("https:{}", thumb_url);
+                }
+                let encoded_thumb = urlencoding::encode(&thumb_url);
+
+                subs.push(SubscriptionItem {
+                    channel_id: channel_id.to_string(),
+                    title: username.to_string(),
+                    thumbnail: thumb_url.to_string(),
+                    local_thumbnail: format!("{}/channel_icon/{}", base_trimmed, encoded_thumb),
+                    profile_url: format!("{}/get_author_videos.php?author={}", base_trimmed, username),
+                });
+            }
+        }
+    }
+    subs
+}
+
+/// Fetches subscriptions for a refresh token. Returns empty vec on any error.
+pub async fn fetch_subscriptions_for_token(
+    refresh_token: &str,
+    auth_config: &AuthConfig,
+    config: &crate::config::Config,
+    base_trimmed: &str,
+) -> Vec<SubscriptionItem> {
+    let access_token = match refresh_access_token(refresh_token, auth_config).await {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
     let client = Client::new();
     let payload = serde_json::json!({
         "context": {
             "client": {
-                "hl": "en",
-                "gl": "US",
-                "deviceMake": "Samsung",
-                "deviceModel": "SmartTV",
+                "hl": "en", "gl": "US", "deviceMake": "Samsung", "deviceModel": "SmartTV",
                 "userAgent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/538.1",
-                "clientName": "TVHTML5",
-                "clientVersion": "7.20250209.19.00",
-                "osName": "Tizen",
-                "osVersion": "5.0",
-                "platform": "TV",
-                "clientFormFactor": "UNKNOWN_FORM_FACTOR",
-                "screenPixelDensity": 1
+                "clientName": "TVHTML5", "clientVersion": "7.20250209.19.00",
+                "osName": "Tizen", "osVersion": "5.0", "platform": "TV",
+                "clientFormFactor": "UNKNOWN_FORM_FACTOR", "screenPixelDensity": 1
             }
         },
-        "browseId": "FEwhat_to_watch"
+        "browseId": "FEsubscriptions"
     });
-
-    let api_key = match data.config.get_innertube_key() {
-        Some(k) => k,
-        None => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Missing innertube_key in config.yml"
-            }));
-        }
-    };
-
-    let url = format!("https://www.youtube.com/youtubei/v1/browse?key={}", api_key);
-
-    let res = client
+    let url = format!(
+        "https://www.youtube.com/youtubei/v1/browse?key={}",
+        config.get_api_key_rotated()
+    );
+    let Ok(response) = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", access_token))
         .json(&payload)
         .send()
-        .await;
-
-    match res {
-        Ok(response) => match response.json::<serde_json::Value>().await {
-            Ok(json_data) => {
-                let mut recommendations = parse_recommendations(&json_data, count);
-                for item in &mut recommendations {
-                    item.thumbnail = format!("{}/thumbnail/{}", base_trimmed, item.video_id);
-                }
-                HttpResponse::Ok().json(recommendations)
-            }
-            Err(e) => {
-                crate::log::info!("Error parsing recommendations: {}", e);
-                HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Failed to parse response"
-                }))
-            }
-        },
-        Err(e) => {
-            crate::log::info!("Error calling recommendations API: {}", e);
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to call recommendations API"
-            }))
-        }
-    }
+        .await
+    else {
+        return Vec::new();
+    };
+    let Ok(json_data) = response.json::<serde_json::Value>().await else {
+        return Vec::new();
+    };
+    parse_subscriptions_from_browse(&json_data, base_trimmed)
 }
 
 #[utoipa::path(
@@ -757,47 +871,7 @@ pub async fn get_subscriptions(
     match res {
         Ok(response) => match response.json::<serde_json::Value>().await {
             Ok(json_data) => {
-                let mut subs = Vec::new();
-                if let Some(tabs) = json_data.pointer("/contents/tvBrowseRenderer/content/tvSecondaryNavRenderer/sections/0/tvSecondaryNavSectionRenderer/tabs")
-                        .and_then(|t| t.as_array()) {
-                        for tab in tabs {
-                            if let Some(renderer) = tab.get("tabRenderer") {
-                                let username = renderer.get("title").and_then(|t| t.as_str()).unwrap_or("Unknown");
-                                if username.eq_ignore_ascii_case("all") {
-                                    continue;
-                                }
-                                let thumb_url = renderer
-                                    .get("thumbnail")
-                                    .and_then(|t| t.get("thumbnails"))
-                                    .and_then(|th| th.as_array())
-                                    .and_then(|arr| arr.last())
-                                    .and_then(|v| v.get("url"))
-                                    .and_then(|u| u.as_str())
-                                    .unwrap_or("");
-                                let channel_id = renderer
-                                    .get("endpoint")
-                                    .and_then(|e| e.get("browseEndpoint"))
-                                    .and_then(|b| b.get("browseId"))
-                                    .and_then(|b| b.as_str())
-                                    .unwrap_or("unknown");
-
-                                let mut thumb_url = thumb_url.to_string();
-                                if thumb_url.starts_with("//") {
-                                    thumb_url = format!("https:{}", thumb_url);
-                                }
-                                let encoded_thumb = urlencoding::encode(&thumb_url);
-
-                                subs.push(SubscriptionItem {
-                                    channel_id: channel_id.to_string(),
-                                    title: username.to_string(),
-                                    thumbnail: thumb_url.to_string(),
-                                    local_thumbnail: format!("{}/channel_icon/{}", base_trimmed, encoded_thumb),
-                                    profile_url: format!("{}get_author_videos.php?author={}", base_trimmed, username),
-                                });
-                            }
-                        }
-                    }
-
+                let subs = parse_subscriptions_from_browse(&json_data, base_trimmed);
                 HttpResponse::Ok().json(SubscriptionsResponse {
                     status: "success".to_string(),
                     count: subs.len(),
@@ -818,6 +892,31 @@ pub async fn get_subscriptions(
             }))
         }
     }
+}
+
+/// Returns subscriptions for the current session (cookie). Used by the home page JS to load the sidebar.
+pub async fn get_subscriptions_session(
+    req: HttpRequest,
+    data: web::Data<crate::AppState>,
+    auth_config: web::Data<AuthConfig>,
+    token_store: web::Data<TokenStore>,
+) -> impl Responder {
+    let base = base_url(&req, &data.config);
+    let base_trimmed = base.trim_end_matches('/');
+    let refresh_token = req
+        .cookie("session_id")
+        .and_then(|c| token_store.get_token(c.value()))
+        .filter(|t| !t.is_empty() && !t.starts_with("Error"));
+    let subscriptions = match refresh_token {
+        Some(ref token) => {
+            fetch_subscriptions_for_token(token, &auth_config, &data.config, base_trimmed).await
+        }
+        None => Vec::new(),
+    };
+    HttpResponse::Ok().json(serde_json::json!({
+        "main_url": base_trimmed,
+        "subscriptions": subscriptions
+    }))
 }
 
 #[utoipa::path(
@@ -873,7 +972,6 @@ pub async fn get_history(
 
     let mut videos: Vec<HistoryItem> = Vec::new();
     let mut continuation: Option<String> = None;
-
     while videos.len() < count {
         let page = fetch_history_page(&access_token, continuation.clone(), &data.config).await;
         if page.is_none() {

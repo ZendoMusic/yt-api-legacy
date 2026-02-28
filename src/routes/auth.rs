@@ -2,6 +2,7 @@ use actix_web::{web, HttpResponse, Responder, HttpRequest};
 use serde::{Serialize, Deserialize};
 use utoipa::ToSchema;
 use std::collections::HashMap;
+use std::fs;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 use base64::{Engine as _, engine::general_purpose};
@@ -446,6 +447,38 @@ pub fn get_auth_url(config: &AuthConfig, session_id: &str) -> String {
     )
 }
 
+/// Serves the login page (Google account sign-in) that works through /auth.
+pub async fn auth_login_page() -> impl Responder {
+    let html = fs::read_to_string("assets/html/login.html")
+        .unwrap_or_else(|_| {
+            r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>Sign in</title></head>
+<body><h1>Sign in</h1><p><a href="/auth/start">Sign in with Google</a></p></body></html>"#.to_string()
+        });
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(html)
+}
+
+/// Redirects to Google OAuth; callback goes to /oauth/callback. Sets session_id cookie.
+pub async fn auth_start(
+    req: HttpRequest,
+    data: web::Data<AuthConfig>,
+) -> impl Responder {
+    let session_id = req
+        .cookie("session_id")
+        .map(|c| c.value().to_string())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let auth_url = get_auth_url(&data, &session_id);
+    let cookie = Cookie::build("session_id", session_id.clone())
+        .path("/")
+        .same_site(SameSite::Lax)
+        .http_only(false)
+        .finish();
+    HttpResponse::Found()
+        .insert_header(("Location", auth_url))
+        .insert_header(("Set-Cookie", cookie.to_string()))
+        .finish()
+}
 
 #[utoipa::path(
     get,
@@ -803,12 +836,11 @@ pub async fn oauth_callback(
     get,
     path = "/account_info",
     params(
-        ("token" = String, Query, description = "Refresh token for Google account")
+        ("token" = Option<String>, Query, description = "Refresh token (optional if session cookie is set)")
     ),
     responses(
         (status = 200, description = "Account information", body = AccountInfoResponse),
-        (status = 400, description = "Missing token parameter"),
-        (status = 401, description = "Invalid refresh token"),
+        (status = 401, description = "Missing or invalid token"),
         (status = 500, description = "Failed to get account information")
     )
 )]
@@ -816,23 +848,31 @@ pub async fn account_info(
     req: HttpRequest,
     query: web::Query<HashMap<String, String>>,
     data: web::Data<AuthConfig>,
+    token_store: web::Data<TokenStore>,
 ) -> impl Responder {
-    let refresh_token = query.get("token");
-    
+    // Token: from query ?token=... or from session (cookie session_id)
+    let refresh_token = query.get("token").cloned().or_else(|| {
+        req.cookie("session_id")
+            .map(|c| c.value().to_string())
+            .and_then(|session_id| token_store.get_token(&session_id))
+            .filter(|t| !t.is_empty() && !t.starts_with("Error"))
+    });
+
     if refresh_token.is_none() {
-        return HttpResponse::BadRequest()
+        return HttpResponse::Unauthorized()
+            .insert_header(("Cache-Control", "no-store, no-cache, must-revalidate"))
             .json(serde_json::json!({
-                "error": "Missing token parameter. Use ?token=YOUR_REFRESH_TOKEN"
+                "error": "Missing or invalid token. Sign in or use ?token=YOUR_REFRESH_TOKEN"
             }));
     }
-    
+
     let refresh_token = refresh_token.unwrap();
     
     let client = reqwest::Client::new();
     let params = [
         ("client_id", data.client_id.as_str()),
         ("client_secret", data.client_secret.as_str()),
-        ("refresh_token", refresh_token),
+        ("refresh_token", &refresh_token),
         ("grant_type", "refresh_token"),
     ];
     
@@ -1098,5 +1138,7 @@ pub async fn account_info(
         youtube_channel,
     };
     
-    HttpResponse::Ok().json(response)
+    HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store, no-cache, must-revalidate"))
+        .json(response)
 }

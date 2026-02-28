@@ -340,9 +340,16 @@ impl Config {
             .map(|s| s.as_str())
             .filter(|k| !k.is_empty() && !bad.contains(k))
             .collect();
-        
 
-        
+        if good_keys.is_empty() {
+            return self
+                .api
+                .keys
+                .active
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("");
+        }
         let index = API_KEY_COUNTER.fetch_add(1, Ordering::Relaxed) % good_keys.len();
         good_keys[index]
     }

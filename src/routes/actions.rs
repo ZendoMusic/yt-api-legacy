@@ -151,6 +151,7 @@ async fn resolve_channel_id(input: &str, client: &Client) -> Result<String, Stri
     Err("Unable to resolve channel id".to_string())
 }
 
+/// YouTube Data API v3: subscriptions.insert (как в new_endpoints/subscribe_innertube.py).
 async fn subscribe_channel_api(
     client: &Client,
     channel_id: &str,
@@ -164,7 +165,6 @@ async fn subscribe_channel_api(
             }
         }
     });
-
     let resp = client
         .post("https://www.googleapis.com/youtube/v3/subscriptions?part=snippet")
         .header("Authorization", format!("Bearer {}", access_token))
@@ -174,11 +174,9 @@ async fn subscribe_channel_api(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     let body = serde_json::from_str(&text).unwrap_or_else(|_| json!({ "raw": text }));
-
     if status.is_success() {
         Ok(body)
     } else {
@@ -186,6 +184,7 @@ async fn subscribe_channel_api(
     }
 }
 
+/// YouTube Data API v3: subscriptions.list (mine=true, forChannelId) — как в new_endpoints.
 async fn find_subscription_id(
     client: &Client,
     channel_id: &str,
@@ -203,14 +202,12 @@ async fn find_subscription_id(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-
     if !resp.status().is_success() {
         return Err(format!(
             "Subscriptions.list failed with {}",
             resp.status().as_u16()
         ));
     }
-
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     if let Some(items) = json.get("items").and_then(|i| i.as_array()) {
         if let Some(item) = items.first() {
@@ -219,10 +216,10 @@ async fn find_subscription_id(
             }
         }
     }
-
     Ok(None)
 }
 
+/// YouTube Data API v3: subscriptions.delete — как в new_endpoints/subscribe_innertube.py.
 async fn delete_subscription(
     client: &Client,
     subscription_id: &str,
@@ -235,16 +232,16 @@ async fn delete_subscription(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-
-    let status = resp.status();
-    if status.is_success() {
+    if resp.status().is_success() {
         Ok(())
     } else {
+        let status_code = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
-        Err(format!("Delete failed {}: {}", status.as_u16(), text))
+        Err(format!("Delete failed {}: {}", status_code, text))
     }
 }
 
+/// YouTube Data API v3: videos.rate — как в new_endpoints/youtube_rate.py.
 async fn rate_video_api(
     client: &Client,
     video_id: &str,
@@ -259,7 +256,6 @@ async fn rate_video_api(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-
     if resp.status() == reqwest::StatusCode::NO_CONTENT {
         Ok(())
     } else {
@@ -273,10 +269,7 @@ async fn rate_video_api(
     }
 }
 
-fn validate_rating(value: &str) -> bool {
-    matches!(value.to_lowercase().as_str(), "like" | "dislike" | "none")
-}
-
+/// YouTube Data API v3: videos.getRating — как в new_endpoints/check_rating.py.
 async fn get_rating_api(
     client: &Client,
     video_id: &str,
@@ -289,7 +282,6 @@ async fn get_rating_api(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
@@ -299,7 +291,6 @@ async fn get_rating_api(
             text
         ));
     }
-
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     if let Some(items) = json.get("items").and_then(|v| v.as_array()) {
         if let Some(first) = items.first() {
@@ -311,11 +302,8 @@ async fn get_rating_api(
     Err("No rating info returned for the given video id".to_string())
 }
 
-async fn prefer_refreshed_token(token: &str, auth_config: &AuthConfig) -> String {
-    match refresh_access_token(token, auth_config).await {
-        Ok(access) => access,
-        Err(_) => token.to_string(),
-    }
+fn validate_rating(value: &str) -> bool {
+    matches!(value.to_lowercase().as_str(), "like" | "dislike" | "none")
 }
 
 #[utoipa::path(
@@ -466,7 +454,7 @@ pub async fn rate(
     path = "/actions/check_rating",
     params(
         ("video_id" = String, Query, description = "YouTube video id"),
-        ("token" = String, Query, description = "OAuth access or refresh token")
+        ("token" = String, Query, description = "OAuth refresh token")
     ),
     responses(
         (status = 200, description = "Current rating for the video", body = RatingCheckResponse),
@@ -486,7 +474,10 @@ pub async fn check_rating(
         );
     }
 
-    let access_token = prefer_refreshed_token(&request.token, &auth_config).await;
+    let access_token = match obtain_access_token(&request.token, &auth_config).await {
+        Ok(token) => token,
+        Err(err) => return err,
+    };
     let client = Client::new();
     match get_rating_api(&client, &request.video_id, &access_token).await {
         Ok(rating) => HttpResponse::Ok().json(RatingCheckResponse {
@@ -503,7 +494,7 @@ pub async fn check_rating(
     path = "/actions/check_subscription",
     params(
         ("channel" = String, Query, description = "Channel handle, URL or UC id"),
-        ("token" = String, Query, description = "OAuth access or refresh token")
+        ("token" = String, Query, description = "OAuth refresh token")
     ),
     responses(
         (status = 200, description = "Subscription status", body = SubscriptionCheckResponse),
@@ -524,7 +515,10 @@ pub async fn check_subscription(
         );
     }
 
-    let access_token = prefer_refreshed_token(&request.token, &auth_config).await;
+    let access_token = match obtain_access_token(&request.token, &auth_config).await {
+        Ok(token) => token,
+        Err(err) => return err,
+    };
     let client = Client::new();
     let channel_id = match resolve_channel_id(&request.channel, &client).await {
         Ok(id) => id,

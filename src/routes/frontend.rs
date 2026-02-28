@@ -7,6 +7,8 @@ use serde::Deserialize;
 use std::fs;
 
 use crate::config::Config;
+use crate::routes::additional::{HistoryItem, RecommendationItem};
+use crate::routes::auth::{AuthConfig, TokenStore};
 use crate::routes::channel::{ChannelVideosResponse, ChannelVideo};
 use crate::routes::search::{SearchResult, TopVideo};
 use crate::routes::video::{RelatedVideo, VideoInfoResponse};
@@ -24,6 +26,11 @@ fn base_url(req: &HttpRequest, config: &Config) -> String {
 fn load_template(name: &str) -> String {
     let path = format!("assets/html/frontend/{}.html", name);
     fs::read_to_string(&path).unwrap_or_else(|_| format!("<!-- template {} not found -->", name))
+}
+
+fn load_root_index() -> String {
+    fs::read_to_string("assets/html/index.html")
+        .unwrap_or_else(|_| "<!-- assets/html/index.html not found -->".to_string())
 }
 
 async fn fetch_json<T: for<'de> Deserialize<'de>>(
@@ -71,43 +78,458 @@ fn render_navbar(main_url: &str, search_query: &str) -> String {
         .replace("{{SEARCH_QUERY}}", &h(search_query))
 }
 
-// ---- Sidebar (guide) - separate partial, used on results and channel
-fn render_sidebar(main_url: &str) -> String {
+// ---- Sidebar (guide) - separate partial; tech section only on root page
+fn render_sidebar(main_url: &str, tech_section: Option<&str>) -> String {
     let t = load_template("partials/sidebar");
-    t.replace("{{MAIN_URL}}", main_url)
+    let t = t.replace("{{MAIN_URL}}", main_url);
+    t.replace("{{SIDEBAR_TECH_SECTION}}", tech_section.unwrap_or(""))
 }
 
-// ---- Home (index): top videos ----
+fn render_sidebar_tech_section(port: u16, instants: &[crate::config::InstantInstance], main_url: &str) -> String {
+    let mut body = String::new();
+    body.push_str(&format!(
+        "<p class=\"guide-tech-line\"><strong>Port:</strong> {}</p>",
+        port
+    ));
+    body.push_str("<p class=\"guide-tech-line\"><strong>Instances</strong></p><ul class=\"guide-tech-list\">");
+    if instants.is_empty() {
+        body.push_str("<li>None configured</li>");
+    } else {
+        for inst in instants {
+            let url = h(&inst.0);
+            let link = format!("{}/", inst.0.trim_end_matches('/'));
+            body.push_str(&format!(
+                "<li><a href=\"{}\" target=\"_blank\" rel=\"noopener\">{}</a></li>",
+                h(&link),
+                url
+            ));
+        }
+    }
+    body.push_str("</ul>");
+    body.push_str(&format!(
+        "<p class=\"guide-tech-line\"><a href=\"{}/docs/\">Documentation</a></p>",
+        main_url
+    ));
+    body.push_str(
+        "<p class=\"guide-tech-line\"><a href=\"https://github.com/ZendoMusic/yt-api-legacy\" target=\"_blank\" rel=\"noopener\">GitHub</a></p>",
+    );
+    format!(
+        r#"<li class="guide-section vve-check guide-section-service">
+            <div class="guide-item-container personal-item">
+              <h3>Service</h3>
+              <div class="guide-service-tech">{}</div>
+            </div>
+            <hr class="guide-section-separator">
+          </li>"#,
+        body
+    )
+}
+
+// ---- Root "/": index with navbar, sidebar, videos, recommendations shelf, tech footer ----
+pub async fn page_root(
+    req: HttpRequest,
+    data: web::Data<crate::AppState>,
+    auth_config: web::Data<AuthConfig>,
+    token_store: web::Data<TokenStore>,
+) -> impl Responder {
+    let config = &data.config;
+    let main_url = base_url(&req, config);
+    let main_url_trimmed = main_url.trim_end_matches('/');
+    let port = config.server.port;
+
+    let videos: Vec<TopVideo> = match fetch_json::<Vec<TopVideo>>(
+        &main_url,
+        "/get_top_videos.php?count=24",
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            crate::log::info!("Root index: failed to fetch top videos: {}", e);
+            Vec::new()
+        }
+    };
+
+    let refresh_token = req
+        .cookie("session_id")
+        .and_then(|c| token_store.get_token(c.value()))
+        .filter(|t| !t.is_empty() && !t.starts_with("Error"));
+
+    let recommendations = match refresh_token {
+        Some(ref token) => crate::routes::additional::fetch_recommendations_for_token(
+            token,
+            &auth_config,
+            config,
+            main_url_trimmed,
+            24,
+        )
+        .await
+        .unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    let history = match refresh_token {
+        Some(ref token) => {
+            crate::routes::additional::fetch_history_for_token(
+                token,
+                &auth_config,
+                config,
+                main_url_trimmed,
+                24,
+            )
+            .await
+        }
+        None => Vec::new(),
+    };
+
+    let navbar = render_navbar(&main_url, "");
+    let sidebar_tech_section = render_sidebar_tech_section(port, &config.instants, &main_url);
+    let sidebar_html = render_sidebar(&main_url, Some(&sidebar_tech_section));
+    let (main_content, subscriptions_sidebar, body_class) = match refresh_token {
+        Some(_) => {
+            let videos_grid = render_video_grid(&videos, &main_url);
+            let recommendations_shelf = render_recommendations_shelf(&recommendations, &main_url);
+            let history_shelf = render_history_shelf(&history, &main_url);
+            let content = format!(
+                r#"<div class="compact-shelf-content-container">
+                      <div class="yt-uix-shelfslider-body">
+                        <ul class="yt-uix-shelfslider-list">{}</ul>
+                      </div>
+                    </div>
+                    {}
+                    {}"#,
+                videos_grid,
+                recommendations_shelf,
+                history_shelf
+            );
+            (content, subscriptions_sidebar_loading_placeholder(), String::new())
+        }
+        None => (
+            logged_out_main_placeholder(),
+            String::new(),
+            "home-logged-out".to_string(),
+        ),
+    };
+
+    let t = load_root_index();
+    let html = t
+        .replace("{{NAVBAR}}", &navbar)
+        .replace("{{SIDEBAR}}", &sidebar_html)
+        .replace("{{MAIN_URL}}", &main_url)
+        .replace("{{PORT}}", &port.to_string())
+        .replace("{{MAIN_CONTENT}}", &main_content)
+        .replace("{{SUBSCRIPTIONS_SIDEBAR}}", &subscriptions_sidebar)
+        .replace("{{BODY_CLASS}}", &body_class);
+
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(html)
+}
+
+fn thumb_url(v: &RecommendationItem, base: &str) -> String {
+    if v.thumbnail.is_empty() {
+        format!("{}/thumbnail/{}", base.trim_end_matches('/'), v.video_id)
+    } else {
+        v.thumbnail.clone()
+    }
+}
+
+fn render_recommendations_shelf(items: &[RecommendationItem], main_url: &str) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let base = main_url.trim_end_matches('/');
+    let watch_url = |vid: &str| format!("{}/watch?v={}", main_url, vid);
+
+    let mut featured = String::new();
+    if let Some(large) = items.first() {
+        let thumb = thumb_url(large, base);
+        let w = watch_url(&large.video_id);
+        featured.push_str(&format!(
+            r#"<br>
+<div class="shelf-wrapper clearfix">
+  <div class="lohp-newspaper-shelf shelf-item vve-check  yt-section-hover-container">
+    <div class="lohp-shelf-content">
+      <div class="lohp-large-shelf-container">
+        <div class="clearfix">
+          <div class="vve-check">
+            <a href="{}" class="ux-thumb-wrap yt-uix-sessionlink yt-fluid-thumb-link contains-addto lohp-thumb-wrap spf-link">
+              <span class="video-thumb  yt-thumb yt-thumb-370 yt-thumb-fluid">
+                <span class="yt-thumb-default">
+                  <span class="yt-thumb-clip">
+                    <img src="{}" alt="Thumbnail" width="370">
+                    <span class="vertical-align"></span>
+                  </span>
+                </span>
+              </span>
+              <span class="video-time">{}</span>
+            </a>
+            <a class="lohp-video-link max-line-2 yt-uix-sessionlink spf-link" href="{}" title="{}">{}</a>
+          </div>
+        </div>
+        <div class="lohp-video-metadata">
+          <span class="content-uploader lohp-video-metadata-item spf-link">
+            <span class="username-prepend">by</span> <a href="{}" class="g-hovercard yt-uix-sessionlink yt-user-name spf-link">{}</a>
+          </span>
+        </div>
+      </div>
+      <div class="lohp-medium-shelves-container">"#,
+            h(&w),
+            h(&thumb),
+            h(&large.duration),
+            h(&w),
+            h(&large.title),
+            h(&large.title),
+            format!("{}/results?search_query={}", main_url, urlencoding::encode(&large.author)),
+            h(&large.author)
+        ));
+        for (_, v) in items.iter().skip(1).take(3).enumerate() {
+            let thumb = thumb_url(v, base);
+            let w = watch_url(&v.video_id);
+            featured.push_str(&format!(
+                r#"<div class="lohp-medium-shelf vve-check spf-link">
+        <div class="vve-check">
+          <div class="lohp-media-object">
+            <a href="{}" class="ux-thumb-wrap yt-uix-sessionlink yt-fluid-thumb-link contains-addto lohp-thumb-wrap">
+              <span class="video-thumb  yt-thumb yt-thumb-170 yt-thumb-fluid">
+                <span class="yt-thumb-default">
+                  <span class="yt-thumb-clip">
+                    <img src="{}" alt="Thumbnail" width="170">
+                    <span class="vertical-align"></span>
+                  </span>
+                </span>
+              </span>
+              <span class="video-time">{}</span>
+            </a>
+          </div>
+          <div class="lohp-media-object-content lohp-medium-shelf-content">
+            <a class="lohp-video-link max-line-2 yt-uix-sessionlink spf-link" href="{}" title="{}">{}</a>
+            <div class="lohp-video-metadata attached">
+              <span class="content-uploader  spf-link">
+                <span class="username-prepend">by</span> <a href="{}" class="g-hovercard yt-uix-sessionlink yt-user-name spf-link">{}</a>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>"#,
+                h(&w),
+                h(&thumb),
+                h(&v.duration),
+                h(&w),
+                h(&v.title),
+                h(&v.title),
+                format!("{}/results?search_query={}", main_url, urlencoding::encode(&v.author)),
+                h(&v.author)
+            ));
+        }
+        featured.push_str("</div></div></div></div>");
+    }
+
+    let mut list = String::new();
+    for v in items.iter().skip(4) {
+        let w = watch_url(&v.video_id);
+        let thumb = thumb_url(v, base);
+        let author_url = format!("{}/results?search_query={}", main_url, urlencoding::encode(&v.author));
+        list.push_str(&format!(
+            r#"<li class="channels-content-item yt-shelf-grid-item yt-uix-shelfslider-item ">
+    <div class="yt-lockup clearfix  yt-lockup-video yt-lockup-grid vve-check">
+    <div class="yt-lockup-thumbnail">
+      <a href="{}" class="ux-thumb-wrap yt-uix-sessionlink yt-fluid-thumb-link contains-addto spf-link">
+        <span class="video-thumb  yt-thumb yt-thumb-175 yt-thumb-fluid">
+          <span class="yt-thumb-default">
+            <span class="yt-thumb-clip">
+              <img src="{}" alt="Thumbnail" width="175">
+              <span class="vertical-align"></span>
+            </span>
+          </span>
+        </span>
+        <span class="video-time">{}</span>
+      </a>
+    </div>
+    <div class="yt-lockup-content">
+      <h3 class="yt-lockup-title"><a class="yt-uix-sessionlink yt-uix-tile-link spf-link yt-ui-ellipsis yt-ui-ellipsis-2" href="{}" title="{}">{}</a></h3>
+      <div class="yt-lockup-meta">
+        <ul class="yt-lockup-meta-info">
+          <li>by <a href="{}" class="g-hovercard yt-uix-sessionlink yt-user-name spf-link">{}</a></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</li>"#,
+            h(&w),
+            h(&thumb),
+            h(&v.duration),
+            h(&w),
+            h(&v.title),
+            h(&v.title),
+            h(&author_url),
+            h(&v.author)
+        ));
+    }
+
+    let rest_shelf = if list.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<br>
+<div class="shelf-wrapper clearfix">
+  <div class="compact-shelf shelf-item yt-uix-shelfslider clearfix">
+    <h2 class="branded-page-module-title">Recommended</h2>
+    <div class="compact-shelf-content-container">
+      <div class="yt-uix-shelfslider-body">
+        <ul class="yt-uix-shelfslider-list">{}</ul>
+      </div>
+    </div>
+  </div>
+</div>"#,
+            list
+        )
+    };
+    format!("{}{}", featured, rest_shelf)
+}
+
+fn history_thumb_url(v: &HistoryItem, base: &str) -> String {
+    if v.thumbnail.is_empty() {
+        format!("{}/thumbnail/{}", base.trim_end_matches('/'), v.video_id)
+    } else {
+        v.thumbnail.clone()
+    }
+}
+
+fn render_history_shelf(items: &[HistoryItem], main_url: &str) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let base = main_url.trim_end_matches('/');
+    let watch_url = |vid: &str| format!("{}/watch?v={}", main_url, vid);
+    let mut list = String::new();
+    for v in items {
+        let w = watch_url(&v.video_id);
+        let thumb = history_thumb_url(v, base);
+        let author_url = format!(
+            "{}/results?search_query={}",
+            main_url,
+            urlencoding::encode(&v.author)
+        );
+        list.push_str(&format!(
+            r#"<li class="channels-content-item yt-shelf-grid-item yt-uix-shelfslider-item ">
+    <div class="yt-lockup clearfix  yt-lockup-video yt-lockup-grid vve-check">
+    <div class="yt-lockup-thumbnail">
+      <a href="{}" class="ux-thumb-wrap yt-uix-sessionlink yt-fluid-thumb-link contains-addto spf-link">
+        <span class="video-thumb  yt-thumb yt-thumb-175 yt-thumb-fluid">
+          <span class="yt-thumb-default">
+            <span class="yt-thumb-clip">
+              <img src="{}" alt="Thumbnail" width="175">
+              <span class="vertical-align"></span>
+            </span>
+          </span>
+        </span>
+        <span class="video-time">{}</span>
+      </a>
+    </div>
+    <div class="yt-lockup-content">
+      <h3 class="yt-lockup-title"><a class="yt-uix-sessionlink yt-uix-tile-link spf-link yt-ui-ellipsis yt-ui-ellipsis-2" href="{}" title="{}">{}</a></h3>
+      <div class="yt-lockup-meta">
+        <ul class="yt-lockup-meta-info">
+          <li>by <a href="{}" class="g-hovercard yt-uix-sessionlink yt-user-name spf-link">{}</a></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</li>"#,
+            h(&w),
+            h(&thumb),
+            h(&v.duration),
+            h(&w),
+            h(&v.title),
+            h(&v.title),
+            h(&author_url),
+            h(&v.author)
+        ));
+    }
+    format!(
+        r#"<br>
+<div class="shelf-wrapper clearfix">
+  <div class="compact-shelf shelf-item yt-uix-shelfslider clearfix">
+    <h2 class="branded-page-module-title">Watch history</h2>
+    <div class="compact-shelf-content-container">
+      <div class="yt-uix-shelfslider-body">
+        <ul class="yt-uix-shelfslider-list">{}</ul>
+      </div>
+    </div>
+  </div>
+</div>"#,
+        list
+    )
+}
+
+/// When not logged in: square box with gray border and "Try to find something" instead of videos/recommendations/history.
+fn logged_out_main_placeholder() -> String {
+    r#"<div class="home-logged-out-placeholder">
+  <p class="home-logged-out-text">Try to find something</p>
+</div>"#
+        .to_string()
+}
+
+/// Placeholder for subscriptions sidebar: same loading GIF + "Loading..." as on login (QR load). JS replaces #subscriptions-sidebar-content with the list.
+fn subscriptions_sidebar_loading_placeholder() -> String {
+    r#"<div class="branded-page-related-channels branded-page-box yt-card">
+  <h2 class="branded-page-module-title" dir="ltr">Subscriptions</h2>
+  <div id="subscriptions-sidebar-content" class="subscriptions-loading-box">
+    <p class="yt-spinner">
+      <img class="yt-spinner-img" src="/assets/images/pixel-vfl3z5WfW.gif" alt="Loading" title="">
+    </p>
+    <span class="yt-spinner-message">Loading...</span>
+  </div>
+</div>"#
+        .to_string()
+}
+
+// ---- Home (index): top videos — same structure as yt2014 index (compact shelf) ----
 fn render_video_grid(videos: &[TopVideo], main_url: &str) -> String {
+    let base = main_url.trim_end_matches('/');
     let mut out = String::new();
     for v in videos {
-        let watch_url = format!("{}/watch?v={}", main_url, h(&v.video_id));
+        let watch_url = format!("{}/watch?v={}", main_url, v.video_id);
+        let thumb = if v.thumbnail.is_empty() {
+            format!("{}/thumbnail/{}", base, v.video_id)
+        } else {
+            v.thumbnail.clone()
+        };
+        let author_url = format!("{}/results?search_query={}", main_url, urlencoding::encode(&v.author));
         out.push_str(&format!(
-            r#"<li class="channels-content-item yt-shelf-grid-item">
-    <div class="yt-lockup yt-lockup-video yt-lockup-grid">
-        <div class="yt-lockup-thumbnail">
-            <a href="{}" class="ux-thumb-wrap spf-link">
-                <span class="video-thumb yt-thumb yt-thumb-185">
-                    <span class="yt-thumb-clip">
-                        <img src="{}" alt="{}" width="185">
-                    </span>
-                </span>
-                <span class="video-time">{}</span>
-            </a>
-        </div>
-        <div class="yt-lockup-content">
-            <h3 class="yt-lockup-title"><a href="{}" class="spf-link yt-ui-ellipsis-2" title="{}">{}</a></h3>
-            <div class="yt-lockup-meta"><ul class="yt-lockup-meta-info"><li>{}</li></ul></div>
-        </div>
+            r#"<li class="channels-content-item yt-shelf-grid-item yt-uix-shelfslider-item ">
+    <div class="yt-lockup clearfix  yt-lockup-video yt-lockup-grid vve-check">
+    <div class="yt-lockup-thumbnail">
+      <a href="{}" class="ux-thumb-wrap yt-uix-sessionlink yt-fluid-thumb-link contains-addto spf-link">
+        <span class="video-thumb  yt-thumb yt-thumb-175 yt-thumb-fluid">
+          <span class="yt-thumb-default">
+            <span class="yt-thumb-clip">
+              <img src="{}" alt="Thumbnail" width="175">
+              <span class="vertical-align"></span>
+            </span>
+          </span>
+        </span>
+        <span class="video-time">{}</span>
+      </a>
     </div>
+    <div class="yt-lockup-content">
+      <h3 class="yt-lockup-title"><a class="yt-uix-sessionlink yt-uix-tile-link spf-link yt-ui-ellipsis yt-ui-ellipsis-2" href="{}" title="{}">{}</a></h3>
+      <div class="yt-lockup-meta">
+        <ul class="yt-lockup-meta-info">
+          <li>by <a href="{}" class="g-hovercard yt-uix-sessionlink yt-user-name spf-link">{}</a></li>
+        </ul>
+      </div>
+    </div>
+  </div>
 </li>"#,
-            watch_url,
-            v.thumbnail,
+            h(&watch_url),
+            h(&thumb),
+            h(&v.duration),
+            h(&watch_url),
             h(&v.title),
-            v.duration,
-            watch_url,
             h(&v.title),
-            h(&v.title),
+            h(&author_url),
             h(&v.author)
         ));
     }
@@ -232,7 +654,7 @@ pub async fn page_results(
     };
 
     let navbar = render_navbar(&main_url, &search_query);
-    let sidebar_html = render_sidebar(&main_url);
+    let sidebar_html = render_sidebar(&main_url, None);
     let results_html = if videos.is_empty() && !search_query.is_empty() {
         format!(
             r#"<div class="yt-alert yt-alert-default"><div class="yt-alert-content">No results for "{}"</div></div>"#,
@@ -354,6 +776,7 @@ pub async fn page_watch(
     let config = &data.config;
     let base = base_url(&req, config);
     let main_url = base.clone();
+    let base_trimmed = main_url.trim_end_matches('/');
 
     let info: VideoInfoResponse = match fetch_json(
         &base,
@@ -400,7 +823,21 @@ pub async fn page_watch(
     let description = info.description.as_str();
     let comment_count = info.comment_count.as_deref().unwrap_or("0");
     let comments = &info.comments;
-    let embed_src = format!("{}/embed/{}", main_url, video_id);
+
+    let video_src = if base_trimmed.is_empty() {
+        format!("/direct_url?video_id={}", urlencoding::encode(&video_id))
+    } else {
+        format!(
+            "{}/direct_url?video_id={}",
+            base_trimmed,
+            urlencoding::encode(&video_id)
+        )
+    };
+    let poster = if base_trimmed.is_empty() {
+        format!("/thumbnail/{}", urlencoding::encode(&video_id))
+    } else {
+        format!("{}/thumbnail/{}", base_trimmed, urlencoding::encode(&video_id))
+    };
 
     let navbar = render_navbar(&main_url, "");
     let related_html = if related.is_empty() {
@@ -434,7 +871,8 @@ pub async fn page_watch(
         .replace("{{COMMENT_COUNT}}", comment_count)
         .replace("{{COMMENTS_HTML}}", &comments_html)
         .replace("{{RELATED_VIDEOS}}", &related_html)
-        .replace("{{EMBED_SRC}}", &embed_src);
+        .replace("{{VIDEO_SRC}}", &h(&video_src))
+        .replace("{{POSTER}}", &h(&poster));
 
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
@@ -644,7 +1082,7 @@ pub async fn page_channel(
     let channel_url = format!("{}/channel?handle={}", main_url, urlencoding::encode(&handle));
 
     let navbar = render_navbar(&main_url, "");
-    let sidebar_html = render_sidebar(&main_url);
+    let sidebar_html = render_sidebar(&main_url, None);
     let spotlight_html = render_spotlight_html(videos, &main_url);
     let videos_html = render_channel_videos(videos, &main_url);
 
@@ -665,6 +1103,46 @@ pub async fn page_channel(
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
         .body(html)
+}
+
+// ---- Login: sign-in page with navbar, sidebar, QR code auth (IE-compatible) ----
+pub async fn page_login(
+    req: HttpRequest,
+    data: web::Data<crate::AppState>,
+) -> impl Responder {
+    let config = &data.config;
+    let main_url = base_url(&req, config);
+    let navbar = render_navbar(&main_url, "");
+    let sidebar_html = render_sidebar(&main_url, None);
+    let t = load_template("login");
+    let html = t
+        .replace("{{NAVBAR}}", &navbar)
+        .replace("{{SIDEBAR}}", &sidebar_html)
+        .replace("{{MAIN_URL}}", &main_url);
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(html)
+}
+
+// ---- Logout: clear session token, clear cookie, redirect to login ----
+pub async fn page_logout(
+    req: HttpRequest,
+    data: web::Data<crate::AppState>,
+    token_store: web::Data<TokenStore>,
+) -> impl Responder {
+    if let Some(cookie) = req.cookie("session_id") {
+        token_store.remove_token(cookie.value());
+    }
+    let config = &data.config;
+    let main_url = base_url(&req, config);
+    let login_url = format!("{}/auth/login", main_url);
+    HttpResponse::Found()
+        .insert_header(("Location", login_url))
+        .insert_header((
+            "Set-Cookie",
+            "session_id=; Path=/; Max-Age=0",
+        ))
+        .finish()
 }
 
 // ---- Embed: iframe player for watch page (yt2014 embed with same styles) ----

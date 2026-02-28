@@ -2,7 +2,6 @@ use actix_files as fs;
 use actix_web::middleware::{NormalizePath, TrailingSlash};
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use serde::{Deserialize, Serialize};
-use std::fs as stdfs;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -18,7 +17,6 @@ use routes::auth::{AuthConfig, TokenStore};
 #[openapi(
     paths(
         health_check,
-        index,
         routes::auth::auth_handler,
         routes::auth::auth_events,
         routes::auth::oauth_callback,
@@ -120,23 +118,6 @@ async fn health_check() -> impl Responder {
     HttpResponse::Ok().json("YouTube API Legacy is running!")
 }
 
-#[utoipa::path(
-    get,
-    path = "/",
-    responses(
-        (status = 200, description = "HTML page with API information")
-    )
-)]
-async fn index(data: web::Data<AppState>) -> impl Responder {
-    log::info!("Index page requested");
-    let port = data.config.server.port;
-    let html_content = stdfs::read_to_string("assets/html/index.html")
-        .unwrap_or_else(|_| "Error loading HTML file".to_string());
-    let html_content = html_content.replace("<!--PORT-->", &port.to_string());
-    HttpResponse::Ok()
-        .content_type("text/html; charset=utf-8")
-        .body(html_content)
-}
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     log::init_logger();
@@ -197,14 +178,17 @@ async fn main() -> std::io::Result<()> {
             .wrap(log::SelectiveLogger::default())
             .service(fs::Files::new("/assets", "assets/").show_files_listing())
             .service(SwaggerUi::new("/docs/{_:.*}").url("/openapi.json", openapi.clone()))
-            .route("/", web::get().to(index))
+            .route("/", web::get().to(routes::frontend::page_root))
             .route("/home", web::get().to(routes::frontend::page_index))
             .route("/results", web::get().to(routes::frontend::page_results))
             .route("/watch", web::get().to(routes::frontend::page_watch))
             .route("/channel", web::get().to(routes::frontend::page_channel))
+            .route("/logout", web::get().to(routes::frontend::page_logout))
             .route("/embed/{video_id}", web::get().to(routes::frontend::page_embed))
             .route("/health", web::get().to(health_check))
             .route("/auth", web::get().to(routes::auth::auth_handler))
+            .route("/auth/login", web::get().to(routes::frontend::page_login))
+            .route("/auth/start", web::get().to(routes::auth::auth_start))
             .route("/auth/events", web::get().to(routes::auth::auth_events))
             .route(
                 "/oauth/callback",
@@ -323,6 +307,10 @@ async fn main() -> std::io::Result<()> {
             .route(
                 "/get_subscriptions.php",
                 web::get().to(routes::additional::get_subscriptions),
+            )
+            .route(
+                "/api/subscriptions_session",
+                web::get().to(routes::additional::get_subscriptions_session),
             )
             .route(
                 "/get_history.php",
