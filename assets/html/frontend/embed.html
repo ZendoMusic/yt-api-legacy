@@ -34,7 +34,9 @@
           /
           <div class="total-time"></div>
         </div>
-        <button class="speed-btn wide-btn">1x</button>
+        <button class="settings-btn" type="button" title="Settings">
+          <img src="/assets/images/settings.png" alt="Settings">
+        </button>
         <button class="mini-player-btn">
           <img src="/assets/images/miniplayer.png" alt="Mini player">
         </button>
@@ -43,7 +45,42 @@
           <img class="close" src="/assets/images/un_fullscreen.png" alt="Exit fullscreen">
         </button>
       </div>
+      <div class="settings-panel" id="settings-panel">
+        <!-- Annotations
+        <div class="settings-row">
+          <span class="settings-label">Annotations</span>
+          <div class="settings-annotations">
+            <button type="button" class="settings-annot-btn active" data-value="on">ON</button>
+            <button type="button" class="settings-annot-btn" data-value="off">OFF</button>
+          </div>
+        </div>
+        -->
+        <div class="settings-row">
+          <span class="settings-label">Speed</span>
+          <select class="settings-speed" id="settings-speed">
+            <option value="0.25">0.25x</option>
+            <option value="0.5">0.5x</option>
+            <option value="0.75">0.75x</option>
+            <option value="1" selected>Normal</option>
+            <option value="1.25">1.25x</option>
+            <option value="1.5">1.5x</option>
+            <option value="1.75">1.75x</option>
+            <option value="2">2x</option>
+          </select>
+        </div>
+        <div class="settings-row">
+          <span class="settings-label">Quality</span>
+          <select class="settings-quality" id="settings-quality">
+            <option value="auto" selected>Auto (360p)</option>
+            <option value="360">360p</option>
+            <option value="480">480p</option>
+            <option value="720">720p</option>
+            <option value="1080">1080p</option>
+          </select>
+        </div>
+      </div>
     </div>
+    <div class="video-activity-overlay" aria-hidden="true"></div>
     <video src="{{VIDEO_SRC}}" poster="{{POSTER}}"></video>
   </div>
 </body>

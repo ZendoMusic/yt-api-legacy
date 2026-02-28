@@ -1,8 +1,12 @@
 <div id="yt-masthead-container" class="yt-grid-box yt-base-gutter"><div id="yt-masthead"><div class="yt-masthead-logo-container">
-  <a id="logo-container" href="{{MAIN_URL}}/home" title="YouTube home" class="spf-link"><img id="logo" src="{{MAIN_URL}}/assets/images/pixel-vfl3z5WfW.gif" alt="YouTube home"></a>
+  <a id="logo-container" href="{{MAIN_URL}}" title="YouTube" class="spf-link"><img id="logo" src="{{MAIN_URL}}/assets/images/pixel-vfl3z5WfW.gif" alt="YouTube"></a>
   <div id="appbar-guide-button-container"><button class="yt-uix-button yt-uix-button-size-default yt-uix-button-text yt-uix-button-empty yt-uix-button-has-icon appbar-guide-toggle" type="button" id="appbar-guide-button" aria-label="Guide"><span class="yt-uix-button-icon-wrapper"><img src="{{MAIN_URL}}/assets/images/pixel-vfl3z5WfW.gif" class="yt-uix-button-icon yt-uix-button-icon-appbar-guide"></span></button></div>
 </div>
-<div id="yt-masthead-signin"><button class="yt-uix-button yt-uix-button-size-default yt-uix-button-primary" type="button" onclick="window.location.href='{{MAIN_URL}}/auth'" href="{{MAIN_URL}}/auth"><span class="yt-uix-button-content">Sign in</span></button></div>
+<div id="yt-masthead-signin">
+  <div id="masthead-user-area">
+    <button class="yt-uix-button yt-uix-button-size-default yt-uix-button-primary" type="button" onclick="window.location.href='{{MAIN_URL}}/auth/login'"><span class="yt-uix-button-content">Sign in</span></button>
+  </div>
+</div>
 <div id="yt-masthead-content">
 <form id="masthead-search" class="search-form consolidated-form" action="{{MAIN_URL}}/results" method="GET">
   <button class="yt-uix-button yt-uix-button-size-default yt-uix-button-default search-btn-component search-button" type="submit" dir="ltr" id="search-btn" tabindex="2"><span class="yt-uix-button-content">Search</span></button>
@@ -13,3 +17,94 @@
   </div>
 </form></div></div></div>
 <div id="masthead-appbar-container" class="clearfix"><div id="masthead-appbar"><div id="appbar-content" class=""></div></div></div>
+<script type="text/javascript">
+(function(){
+  var base = "{{MAIN_URL}}";
+  var el = document.getElementById("masthead-user-area");
+  if (!el) return;
+  var CACHE_KEY = "yt_account_info";
+  var CACHE_TS_KEY = "yt_account_info_ts";
+  var CACHE_TTL_MS = 10 * 60 * 1000;
+  function esc(s) {
+    if (s == null) return "";
+    s = String(s);
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function renderAccount(data) {
+    var ga = data && data.google_account;
+    var name = ga && ga.name ? ga.name : (ga && ga.given_name ? ga.given_name : "");
+    var picture = ga && ga.picture ? ga.picture : "";
+    if (!name) return;
+    var imgSrc = picture ? esc(picture) : (base + "/assets/images/photo.jpg");
+    var channelUrl = base + "/channel";
+    var handle = "";
+    if (data.youtube_channel && data.youtube_channel.custom_url) {
+      handle = data.youtube_channel.custom_url;
+      channelUrl = base + "/channel?handle=" + encodeURIComponent(handle);
+    }
+    var handleDisplay = handle ? (handle.indexOf("@") === 0 ? handle : "@" + handle) : "";
+    var menuHtml = "<span class=\"masthead-username\">" + esc(name) + "</span><span class=\"masthead-notifications-icon\" title=\"Notifications\" aria-label=\"Notifications\"><img src=\"" + base + "/assets/images/notifications_icon.png\" alt=\"\" width=\"24\" height=\"24\"></span><div class=\"masthead-account-wrap\"><a href=\"#\" class=\"masthead-avatar\" onclick=\"window.toggleMastheadMenu(event);return false;\"><img src=\"" + imgSrc + "\" alt=\"\" width=\"32\" height=\"32\" class=\"masthead-avatar-img\"></a><div id=\"masthead-account-menu\" class=\"masthead-account-menu\" onclick=\"if(event.stopPropagation)event.stopPropagation();else event.cancelBubble=true;\"><div class=\"masthead-menu-user\"><img src=\"" + imgSrc + "\" alt=\"\" class=\"masthead-menu-avatar\"><div class=\"masthead-menu-user-info\"><span class=\"masthead-menu-name\">" + esc(name) + "</span>" + (handleDisplay ? "<span class=\"masthead-menu-handle\">" + esc(handleDisplay) + "</span>" : "") + "<a href=\"" + esc(channelUrl) + "\" class=\"masthead-menu-channel-link\">View your channel</a></div></div><div class=\"masthead-menu-sep\"></div><a href=\"" + base + "/logout\" class=\"masthead-menu-item\" onclick=\"try{localStorage.removeItem('yt_account_info');localStorage.removeItem('yt_account_info_ts');}catch(e){}\">Sign out</a></div></div>";
+    el.innerHTML = menuHtml;
+  }
+  window.toggleMastheadMenu = function(ev) {
+    var e = ev || window.event;
+    if (e.stopPropagation) e.stopPropagation(); else e.cancelBubble = true;
+    var m = document.getElementById("masthead-account-menu");
+    if (!m) return;
+    m.style.display = m.style.display === "block" ? "none" : "block";
+  };
+  document.onclick = function() {
+    var m = document.getElementById("masthead-account-menu");
+    if (m) m.style.display = "none";
+  };
+  function applyCache() {
+    try {
+      var raw = localStorage.getItem(CACHE_KEY);
+      var ts = parseInt(localStorage.getItem(CACHE_TS_KEY) || "0", 10);
+      if (raw && ts && (Date.now() - ts) < CACHE_TTL_MS) {
+        var data = JSON.parse(raw);
+        if (data && data.google_account) {
+          renderAccount(data);
+          return true;
+        }
+      }
+    } catch (e) {}
+    return false;
+  }
+  function saveCache(data) {
+    try {
+      localStorage.setItem(CACHE_KEY, JSON.stringify(data));
+      localStorage.setItem(CACHE_TS_KEY, String(Date.now()));
+    } catch (e) {}
+  }
+  function showSignIn() {
+    try { localStorage.removeItem(CACHE_KEY); localStorage.removeItem(CACHE_TS_KEY); } catch (e) {}
+    el.innerHTML = "<button class=\"yt-uix-button yt-uix-button-size-default yt-uix-button-primary\" type=\"button\" onclick=\"window.location.href='" + base + "/auth/login'\"><span class=\"yt-uix-button-content\">Sign in</span></button>";
+  }
+  var isLogoutPage = (typeof window !== "undefined" && window.location && (window.location.pathname || "").indexOf("/logout") !== -1);
+  if (isLogoutPage) { showSignIn(); }
+  var hadCache = !isLogoutPage && applyCache();
+  var xhr;
+  try { xhr = new XMLHttpRequest(); } catch (e) { xhr = new ActiveXObject("Microsoft.XMLHTTP"); }
+  if (!xhr) return;
+  xhr.onreadystatechange = function() {
+    if (xhr.readyState !== 4) return;
+    if (xhr.status === 401) {
+      showSignIn();
+      return;
+    }
+    if (xhr.status !== 200) return;
+    var data;
+    try { data = JSON.parse(xhr.responseText); } catch (e) { return; }
+    if (!data || !data.google_account) return;
+    var ga = data.google_account;
+    var name = ga.name || ga.given_name || "";
+    if (!name) return;
+    saveCache(data);
+    if (!hadCache) renderAccount(data);
+  };
+  xhr.open("GET", "/account_info?_=" + (typeof Date.now === "function" ? Date.now() : new Date().getTime()), true);
+  try { xhr.withCredentials = true; } catch (e) {}
+  xhr.send();
+})();
+</script>

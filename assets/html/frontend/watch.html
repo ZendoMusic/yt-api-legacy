@@ -60,7 +60,8 @@
       <meta name="attribution" content="TimeWarner_WarnerBros_TMZ/">  
     <link id="css-2080427379" class="www-pageframe" rel="stylesheet" href="/assets/css/www-pageframe-vfl0aBbD_.css" data-loaded="true">
     <link rel="stylesheet" href="/assets/css/frontend-fixes.css" name="frontend-fixes">
-<script>if (window.ytcsi) {window.ytcsi.tick("cl", null, '');}</script></head>    <body dir="ltr" class="  ltr       site-center-aligned site-as-giant-card appbar-hidden     not-nirvana-dogfood  hitchhiker-enabled    delayed-frame-styles-not-in    exp-css-ellipsis  " id="body">
+    <link rel="stylesheet" href="/assets/embed/styles.css">
+<script>if (window.ytcsi) {window.ytcsi.tick("cl", null, '');}</script></head>    <body dir="ltr" class="ltr site-center-aligned site-as-giant-card appbar-hidden watch-page" id="body">
 
   <div id="body-container"><form name="logoutForm" method="POST" action="{{MAIN_URL}}/logout"><input type="hidden" name="action_logout" value="1"></form><div id="masthead-positioner">  
   {{NAVBAR}}   
@@ -89,28 +90,88 @@ Loading...
 
 
 </div><div id="header"></div>
-<!-- Заменяем весь блок плеера -->
+<!-- Inline embed player (no iframe): fullscreen and controls work on watch page -->
 <div id="player" class=" watch-small watch-non-stage-mode ">
   <div id="playlist" class="playlist"></div>
-
-  <!-- Убираем старый unavailable-блок и player-api -->
-  <!-- Вместо этого вставляем нативный <video> -->
-
-  <?php
-  // Получаем прямую ссылку на видео (360p или другую доступную)
-  $direct_url_api = $config_url . '/direct_url?video_id=' . $video_id;
-  ?>
-
   <div class="player-width player-height" style="position: relative; background: #000;">
-      <iframe
-             class="video-stream html5-main-video" 
-             controls 
-             width="100%" 
-             height="100%" src="{{EMBED_SRC}}"></iframe>
+    <div class="video-container paused" data-volume-level="high">
+      <img class="thumbnail-img">
+      <div class="video-controls-container">
+        <div class="timeline-container">
+          <div class="timeline">
+            <img class="preview-img">
+            <div class="thumb-indicator"></div>
+          </div>
+        </div>
+        <div class="controls">
+          <button class="play-pause-btn">
+            <img class="play-icon" src="/assets/images/play.png" alt="Play">
+            <img class="pause-icon" src="/assets/images/pause.png" alt="Pause">
+          </button>
+          <div class="volume-container">
+            <button class="mute-btn">
+              <img class="volume-high-icon" src="/assets/images/volume_full.png" alt="Volume high">
+              <img class="volume-muted-icon" src="/assets/images/volume_none.png" alt="Muted">
+            </button>
+          </div>
+          <div class="duration-container">
+            <div class="current-time">0:00</div>
+            /
+            <div class="total-time"></div>
+          </div>
+          <button class="settings-btn" type="button" title="Settings">
+            <img src="/assets/images/settings.png" alt="Settings">
+          </button>
+          <button class="mini-player-btn">
+            <img src="/assets/images/miniplayer.png" alt="Mini player">
+          </button>
+          <button class="full-screen-btn">
+            <img class="open" src="/assets/images/fullscreen.png" alt="Enter fullscreen">
+            <img class="close" src="/assets/images/un_fullscreen.png" alt="Exit fullscreen">
+          </button>
+        </div>
+        <div class="settings-panel" id="settings-panel">
+          <!-- Annotations
+          <div class="settings-row">
+            <span class="settings-label">Annotations</span>
+            <div class="settings-annotations">
+              <button type="button" class="settings-annot-btn active" data-value="on">ON</button>
+              <button type="button" class="settings-annot-btn" data-value="off">OFF</button>
+            </div>
+          </div>
+          -->
+          <div class="settings-row">
+            <span class="settings-label">Speed</span>
+            <select class="settings-speed" id="settings-speed">
+              <option value="0.25">0.25x</option>
+              <option value="0.5">0.5x</option>
+              <option value="0.75">0.75x</option>
+              <option value="1" selected>Normal</option>
+              <option value="1.25">1.25x</option>
+              <option value="1.5">1.5x</option>
+              <option value="1.75">1.75x</option>
+              <option value="2">2x</option>
+            </select>
+          </div>
+          <div class="settings-row">
+            <span class="settings-label">Quality</span>
+            <select class="settings-quality" id="settings-quality">
+              <option value="auto" selected>Auto (360p)</option>
+              <option value="360">360p</option>
+              <option value="480">480p</option>
+              <option value="720">720p</option>
+              <option value="1080">1080p</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="video-activity-overlay" aria-hidden="true"></div>
+      <video src="{{VIDEO_SRC}}" poster="{{POSTER}}"></video>
+    </div>
   </div>
-
   <div class="clear"></div>
 </div>
+<script src="/assets/embed/script.js" defer></script>
 <div id="content" class="  content-alignment    yt-card ">    <div id="watch7-container" class="      watch-non-stage-mode  ">
     <div id="watch7-main-container">
       <div id="watch7-main" class="clearfix">
@@ -299,6 +360,21 @@ Loading...
             </div>
         </div>
 
+        <div id="action-panel-share" class="action-panel-content hid" style="display: none;">
+            <div id="watch-actions-share-panel">
+                <div class="share-panel">
+                    <div class="share-panel-url-container">
+                        <input class="yt-uix-form-input-text share-panel-url" name="share_url" value="{{MAIN_URL}}/watch?v={{VIDEO_ID}}" readonly title="Share link" id="share-panel-url-input">
+                        <button type="button" class="yt-uix-button yt-uix-button-default share-copy-link-btn" id="share-copy-link-btn"><span class="yt-uix-button-content">Copy link</span></button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="action-panel-addto" class="action-panel-content hid" style="display: none;">
+            <p>Sign in to add this video to a playlist.</p>
+        </div>
+
     </div>
 </div>
           <div class="cmt_iframe_holder" data-href="http://www.youtube.com/watch?v=YhT6d5fMhzI" data-viewtype="FILTERED" style="display: none;"></div>
@@ -429,7 +505,25 @@ Advertisement
     </div>
   </div>
 
-</div></div></div></div>  <div id="footer-container" class="yt-base-gutter"><div id="footer"><div id="footer-main"><div id="footer-logo"><a href="/web/20140428005517/http://www.youtube.com/" title="YouTube home"><img src="/assets/images/pixel-vfl3z5WfW.gif" alt="YouTube home"></a></div>  <ul class="pickers yt-uix-button-group" data-button-toggle-group="optional">
+</div></div></div></div>
+
+<div id="yt-uix-clickcard-card2" class="yt-uix-clickcard-card addto-signin-clickcard" style="display: none; position: fixed; z-index: 99999;">
+  <div class="yt-uix-clickcard-card-border">
+    <div class="yt-uix-clickcard-card-body">
+      <div class="watch7-hovercard yt-uix-clickcard-card-content">
+        <h3 class="watch7-hovercard-header">Sign in to YouTube</h3>
+        <div class="watch7-hovercard-message">
+          Sign in with your Google Account (YouTube, Google+, Gmail, Orkut, Picasa, or Chrome) to add <span class="yt-user-name g-hovercard" dir="ltr">{{AUTHOR}}</span>'s video to your playlist.
+        </div>
+        <div class="watch7-hovercard-account-line">
+          <a href="{{MAIN_URL}}/auth/login" class="yt-uix-button yt-uix-sessionlink yt-uix-button-primary yt-uix-button-size-default"><span class="yt-uix-button-content">Sign in</span></a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+  <div id="footer-container" class="yt-base-gutter"><div id="footer"><div id="footer-main"><div id="footer-logo"><a href="/web/20140428005517/http://www.youtube.com/" title="YouTube home"><img src="/assets/images/pixel-vfl3z5WfW.gif" alt="YouTube home"></a></div>  <ul class="pickers yt-uix-button-group" data-button-toggle-group="optional">
       <li>
             <button onclick=";return false;" class=" yt-uix-button yt-uix-button-default yt-uix-button-size-default yt-uix-button-has-icon" type="button" id="yt-picker-language-button" data-button-action="yt.www.picker.load" data-picker-position="footer" data-button-toggle="true" data-picker-key="language" data-button-menu-id="arrow-display" role="button"><span class="yt-uix-button-icon-wrapper"><img class="yt-uix-button-icon yt-uix-button-icon-footer-language" src="/assets/images/pixel-vfl3z5WfW.gif" alt="" title=""></span><span class="yt-uix-button-content">  <span class="yt-picker-button-label">
 Language:
@@ -799,6 +893,129 @@ if (window.ytcsi) {window.ytcsi.tick("jl", null, '');}</script>
             showLess();
             return false;
         };
+
+        // About / Share / Add to: toggle action panels
+        var actionPanels = document.getElementById("watch7-action-panels");
+        var actionTriggers = document.querySelectorAll(".action-panel-trigger[data-trigger-for]");
+        if (actionPanels && actionTriggers.length) {
+            function removeClass(el, cls) {
+                if (!el || !cls) return;
+                el.className = (el.className || "").replace(new RegExp("\\s*" + cls + "\\b", "g"), "").replace(/^\s+|\s+$/g, "");
+            }
+            function addClass(el, cls) {
+                if (!el || !cls) return;
+                if ((" " + (el.className || "") + " ").indexOf(" " + cls + " ") === -1) el.className = (el.className + " " + cls).replace(/^\s+|\s+$/g, "");
+            }
+            function showPanel(panelId) {
+                var panels = actionPanels.querySelectorAll(".action-panel-content");
+                for (var i = 0; i < panels.length; i++) {
+                    var p = panels[i];
+                    if (p.id === panelId) {
+                        removeClass(p, "hid");
+                        p.style.display = "";
+                    } else {
+                        addClass(p, "hid");
+                        p.style.display = "none";
+                    }
+                }
+                for (var j = 0; j < actionTriggers.length; j++) {
+                    var btn = actionTriggers[j];
+                    if (btn.getAttribute("data-trigger-for") === panelId) {
+                        addClass(btn, "yt-uix-button-toggled");
+                    } else {
+                        removeClass(btn, "yt-uix-button-toggled");
+                    }
+                }
+            }
+            for (var k = 0; k < actionTriggers.length; k++) {
+                (function (btn) {
+                    var panelId = btn.getAttribute("data-trigger-for");
+                    if (!panelId) return;
+                    function onTriggerClick(e) {
+                        if (e && e.preventDefault) e.preventDefault();
+                        showPanel(panelId);
+                        return false;
+                    }
+                    if (btn.addEventListener) btn.addEventListener("click", onTriggerClick, false);
+                    else if (btn.attachEvent) btn.attachEvent("onclick", onTriggerClick);
+                })(actionTriggers[k]);
+            }
+        }
+
+        // Share panel: Copy link button
+        var shareCopyBtn = document.getElementById("share-copy-link-btn");
+        var shareUrlInput = document.getElementById("share-panel-url-input");
+        if (shareCopyBtn && shareUrlInput) {
+            function copyShareLink() {
+                var url = shareUrlInput.value || shareUrlInput.getAttribute("value") || "";
+                if (!url) return;
+                if (window.navigator && window.navigator.clipboard && window.navigator.clipboard.writeText) {
+                    window.navigator.clipboard.writeText(url).then(function () {
+                        shareCopyBtn.firstChild.textContent = "Copied!";
+                        setTimeout(function () { shareCopyBtn.firstChild.textContent = "Copy link"; }, 1500);
+                    });
+                } else {
+                    shareUrlInput.select();
+                    try {
+                        document.execCommand("copy");
+                        shareCopyBtn.firstChild.textContent = "Copied!";
+                        setTimeout(function () { shareCopyBtn.firstChild.textContent = "Copy link"; }, 1500);
+                    } catch (e) {}
+                }
+            }
+            if (shareCopyBtn.addEventListener) shareCopyBtn.addEventListener("click", copyShareLink, false);
+            else if (shareCopyBtn.attachEvent) shareCopyBtn.attachEvent("onclick", copyShareLink);
+        }
+
+        // Add to: show Sign in clickcard and position above the button
+        var addToBtn = document.querySelector('button[data-trigger-for="action-panel-addto"]');
+        var addtoCard = document.getElementById('yt-uix-clickcard-card2');
+        if (addToBtn && addtoCard) {
+            function positionAddtoCard() {
+                var rect = addToBtn.getBoundingClientRect();
+                var cardW = 320;
+                addtoCard.style.left = '-9999px';
+                addtoCard.style.display = 'block';
+                var cardH = addtoCard.offsetHeight || 180;
+                var left = rect.right - cardW;
+                var top = rect.top - cardH - 12;
+                var vw = document.documentElement.clientWidth || window.innerWidth;
+                if (left + cardW > vw - 8) left = vw - cardW - 8;
+                if (left < 8) left = 8;
+                if (top < 8) top = 8;
+                addtoCard.style.left = left + 'px';
+                addtoCard.style.top = top + 'px';
+                addtoCard.className = addtoCard.className.replace(/\s*addto-clickcard-hidden/g, '') + ' yt-uix-clickcard-card-visible';
+            }
+            function hideAddtoCard() {
+                addtoCard.style.display = 'none';
+                addtoCard.className = addtoCard.className.replace(/\s*yt-uix-clickcard-card-visible/g, '') + ' addto-clickcard-hidden';
+            }
+            function onAddToClick(e) {
+                if (e && e.stopPropagation) e.stopPropagation();
+                if (e && e.cancelBubble !== undefined) e.cancelBubble = true;
+                if (addtoCard.style.display === 'block') {
+                    hideAddtoCard();
+                    return;
+                }
+                positionAddtoCard();
+            }
+            function onDocClick(e) {
+                var t = e.target || e.srcElement;
+                while (t && t !== document.body) {
+                    if (t === addtoCard || t === addToBtn) return;
+                    t = t.parentNode;
+                }
+                hideAddtoCard();
+            }
+            if (addToBtn.addEventListener) {
+                addToBtn.addEventListener('click', onAddToClick, false);
+                document.addEventListener('click', onDocClick, false);
+            } else {
+                addToBtn.attachEvent('onclick', onAddToClick);
+                document.attachEvent('onclick', onDocClick);
+            }
+        }
     });
 })();
 </script>

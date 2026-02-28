@@ -1,358 +1,85 @@
 <!DOCTYPE html>
-<html>
+<html lang="en" data-cast-api-enabled="true">
 <head>
-    <meta charset="utf-8">
-    <title>YouTube API Legacy</title>
-    <style nonce="faavl553MFKlQE4WObKBTQ">
-        html {
-            height: 100%;
-            margin: 0;
-            padding: 0;
-            border: 0;
-            font-size: 100%;
-            background: transparent;
-        }
-        body {
-            margin: 0;
-            padding: 0;
-            border: 0;
-            font: 12px "YouTube Noto", Roboto, arial, sans-serif;
-            background: #f1f1f1;
-            color: #333;
-        }
-        #main-page {
-            text-align: center;
-            height: 100%;
-            white-space: nowrap;
-            word-break: normal;
-        }
-        #main-page-content {
-            vertical-align: middle;
-            display: inline-block;
-            max-width: 960px;
-            padding: 0 20px;
-            width: 100%;
-            box-sizing: border-box;
-        }
-        #main-page-hh-illustration {
-            margin: 40px 0 20px;
-        }
-        #main-page-vertical-align {
-            height: 100%;
-            display: inline-block;
-            vertical-align: middle;
-        }
-        p {
-            width: 620px;
-            max-width: 100%;
-            margin: 15px auto;
-            color: #333;
-            font-size: 16px;
-            white-space: normal;
-            line-height: 1.5;
-            text-shadow: 0 0 0 transparent, 0 1px 1px #fff;
-        }
-        a {
-            color: #167ac6;
-            cursor: pointer;
-            text-decoration: none;
-        }
-        a:hover {
-            text-decoration: underline;
-        }
-        #yt-masthead {
-            margin: 25px auto 40px;
-            width: 440px;
-            max-width: 90%;
-        }
-        #logo-container {
-            float: left;
-            cursor: pointer;
-            text-decoration: none;
-        }
-        .logo {
-            background: center / contain no-repeat url(/assets/youtubelogo_50.png);
-            width: 128px;
-            height: 30px;
-            display: inline-block;
-        }
-        #masthead-search {
-            display: flex;
-            margin-top: 3px;
-            max-width: 650px;
-            overflow: hidden;
-        }
-        .search-button {
-            border-left: 0;
-            border-top-left-radius: 0;
-            border-bottom-left-radius: 0;
-            height: 29px;
-            padding: 0;
-            border: solid 1px #d3d3d3;
-            background: #f8f8f8;
-            cursor: pointer;
-        }
-        .search-button:hover {
-            background: #f0f0f0;
-            box-shadow: 0 1px 0 rgba(0,0,0,.1);
-        }
-        .search-button-content {
-            border: none;
-            display: block;
-            opacity: .6;
-            padding: 0;
-            text-indent: -10000px;
-            background: no-repeat url(/assets/search.png);
-            -webkit-background-size: auto auto;
-            background-size: auto;
-            width: 15px;
-            height: 15px;
-            -webkit-box-shadow: none;
-            box-shadow: none;
-            margin: 0 25px;
-        }
-        #masthead-search-terms-border {
-            flex: 1;
-            border: 1px solid #ccc;
-            box-shadow: inset 0 1px 2px #eee;
-            background-color: #fff;
-            height: 29px;
-            position: relative;
-            box-sizing: border-box;
-        }
-        #masthead-search-terms {
-            background: transparent;
-            border: 0;
-            font-size: 16px;
-            height: 100%;
-            padding: 2px 6px;
-            width: 100%;
-            box-sizing: border-box;
-            outline: none;
-        }
-        .container-flex {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 25px;
-            justify-content: center;
-            margin: 40px auto 60px;
-            max-width: 960px;
-        }
-        .info-tile {
-            background: #fff;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-            padding: 24px 28px;
-            flex: 1;
-            min-width: 320px;
-            text-align: left;
-            box-sizing: border-box;
-        }
-        .instances-tile {
-            background: #fff;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-            padding: 24px 28px;
-            flex: 1;
-            min-width: 320px;
-            text-align: left;
-            box-sizing: border-box;
-        }
-        .info-tile h2,
-        .instances-tile h2 {
-            margin: 0 0 14px;
-            font-size: 20px;
-            color: #111;
-        }
-        .info-tile p,
-        .instances-tile p {
-            margin: 0 0 12px;
-            font-size: 15px;
-            line-height: 1.45;
-            width: auto;
-        }
-        .info-tile a,
-        .instances-tile a {
-            color: #065fd4;
-            font-weight: 500;
-        }
-        .badge {
-            background: #e0e0e0;
-            color: #444;
-            padding: 3px 9px;
-            border-radius: 3px;
-            font-size: 0.82em;
-            margin-left: 8px;
-            vertical-align: middle;
-        }
-        .footer-note {
-            margin: 50px auto 30px;
-            font-size: 13px;
-            color: #777;
-            max-width: 600px;
-        }
-        #instances-list {
-            margin-top: 10px;
-        }
-        #instances-list li {
-            margin-bottom: 8px;
-            word-break: break-all;
-        }
-        #loading {
-            color: #777;
-            font-style: italic;
-        }
-        #error {
-            color: #c00;
-        }
-    </style>
-    <base target="_top">
-    <link rel="shortcut icon" href="/assets/favicon.ico" type="image/x-icon">
-    <link rel="icon" href="/assets/favicon_32.png" sizes="32x32">
-    <link rel="icon" href="/assets/favicon_48.png" sizes="48x48">
-    <link rel="icon" href="/assets/favicon_96.png" sizes="96x96">
-    <link rel="icon" href="/assets/favicon_144.png" sizes="144x144">
+  <meta charset="utf-8">
+  <script src="/assets/js/athena.js" type="text/javascript"></script>
+  <script type="text/javascript" src="/assets/js/bundle-playback.js" charset="utf-8"></script>
+  <script type="text/javascript" src="/assets/js/wombat.js" charset="utf-8"></script>
+  <link rel="stylesheet" type="text/css" href="/assets/css/video-js.css">
+  <script type="text/javascript" src="/assets/js/jwplayer.js" charset="utf-8"></script>
+  <script type="text/javascript" src="/assets/js/videojs.min.js" charset="utf-8"></script>
+  <script type="text/javascript" src="/assets/js/bundle-video.js" charset="utf-8"></script>
+  <script>var ytcsi = {gt: function(n) {n = (n || '') + 'data_';return ytcsi[n] || (ytcsi[n] = {tick: {},span: {},info: {}});},tick: function(l, t, n) {ytcsi.gt(n).tick[l] = t || +new Date();},span: function(l, s, n) {ytcsi.gt(n).span[l] = (typeof s == 'number') ? s :+new Date() - ytcsi.data_.tick[l];},info: function(k, v, n) {ytcsi.gt(n).info[k] = v;}};ytcsi.perf = window.performance || window.mozPerformance || window.msPerformance || window.webkitPerformance;ytcsi.tick('_start', ytcsi.perf ? ytcsi.perf.timing.responseStart : null);if (document.webkitVisibilityState == 'prerender') {ytcsi.info('prerender', 1);document.addEventListener('webkitvisibilitychange', function() {ytcsi.tick('_start');}, false);}</script>
+  <script>
+    try { window.ytbuffer = {}; ytbuffer.handleClick = function(e) { var element = e.target || e.srcElement; while (element.parentElement) { if (element.className.match(/(^| )yt-can-buffer( |$)/)) { window.ytbuffer = { bufferedClick: e }; element.className += ' yt-is-buffered'; break; } element = element.parentElement; } }; if (document.addEventListener) { document.addEventListener('click', ytbuffer.handleClick); } else { document.attachEvent('onclick', ytbuffer.handleClick); } } catch(e) {}
+    (function(){function a(b,g,k){var h=document.getElementsByTagName("html")[0],e=[h.className];b&&1251<=(window.innerWidth||document.documentElement.clientWidth)&&(e.push("guide-pinned"),g&&e.push("show-guide"));k&&(b=(window.innerWidth||document.documentElement.clientWidth)-21-50,1251<=(window.innerWidth||document.documentElement.clientWidth)&&g&&(b-=230),e.push(" ",1136<=b?"content-snap-width-3":951<=b?"content-snap-width-2":"content-snap-width-1"));h.className=e.join(" ")}
+    var c=["yt","www","masthead","sizing","init"],d=this;c[0]in d||!d.execScript||d.execScript("var "+c[0]);for(var f;c.length&&(f=c.shift());)c.length||void 0===a?d[f]?d=d[f]:d=d[f]={}:d[f]=a;})();
+    yt.www.masthead.sizing.init(true,true,true);
+  </script>
+  <script src="/assets/js/www-scheduler-vflKNUgKf.js" name="www-scheduler"></script>
+  <link rel="stylesheet" href="/assets/css/www-core-vflkNMZid.css" name="www-core">
+  <script>if (window.ytcsi) { window.ytcsi.tick("ce", null, ''); }</script>
+  <title>YouTube</title>
+  <link rel="shortcut icon" href="/assets/images/favicon-vfldLzJxy.ico" type="image/x-icon">
+  <link rel="icon" href="/assets/images/favicon_32-vflWoMFGx.png" sizes="32x32">
+  <meta name="description" content="Share your videos with friends, family, and the world">
+  <link rel="stylesheet" href="/assets/css/www-pageframe-vflADUc_s.css" name="www-pageframe">
+  <link rel="stylesheet" href="/assets/css/www-guide-vfl7J4hMD.css" name="www-guide">
+  <link rel="stylesheet" href="/assets/css/www-home-c4-vflPNKlE7.css" name="www-home-c4">
+  <link rel="stylesheet" href="/assets/css/frontend-fixes.css" name="frontend-fixes">
 </head>
-<body>
-    <div id="main-page">
-        <div id="yt-masthead">
-            <a id="logo-container" href="/" title="YouTube Home">
-                <span class="logo" title="YouTube Home"></span>
-            </a>
-            <form id="masthead-search" class="search-form" action="/results" method="get">
-                <div id="masthead-search-terms-border" dir="ltr">
-                    <input id="masthead-search-terms"
-                           autocomplete="off"
-                           name="search_query"
-                           value=""
-                           type="text"
-                           title="Search"
-                           aria-label="Search">
-                </div>
-                <button id="masthead-search-button"
-                        class="search-button"
-                        type="submit"
-                        dir="ltr">
-                    <span class="search-button-content">Search</span>
-                </button>
-            </form>
-        </div>
-        <div id="main-page-content">
-            <div class="container-flex">
-                <div class="info-tile">
-                    <h2>About <span class="badge">LegacyProjects</span></h2>
-                    <p>This is a legacy YouTube API service that provides endpoints for fetching video information, channel data, and more.</p>
-                    <p>Part of the LegacyProjects initiative, bringing back the classic YouTube experience for old devices and clients.</p>
-                </div>
-                <div class="info-tile">
-                    <h2>Status</h2>
-                    <p>API is running on port <!--PORT--></p>
-                </div>
-                <div class="info-tile">
-                    <h2>Information</h2>
-                    <p><a href="/docs/">Go to the documentation →</a></p>
-                    <p><a href="https://github.com/ZendoMusic/yt-api-legacy">Go to the source code →</a></p>
-                </div>
-                <div class="instances-tile">
-                    <h2>Available Instances</h2>
-                    <div id="loading">Loading instances...</div>
-                    <ul id="instances-list"></ul>
-                    <div id="error" style="display:none;"></div>
-                </div>
-            </div>
-            <div class="footer-note">
-                YouTube Legacy API Service • Running on port <!--PORT--> • LegacyProjects
-            </div>
-        </div>
-        <span id="main-page-vertical-align"></span>
+<body dir="ltr" class="ltr site-center-aligned site-as-giant-card guide-pinning-enabled appbar-hidden flex-width-enabled flex-width-enabled-snap {{BODY_CLASS}}" id="body">
+  <script>if (window.ytcsi) { window.ytcsi.tick("cl", null, ''); }</script>
+  <div id="body-container">
+    <form name="logoutForm" method="POST" action="{{MAIN_URL}}/logout"><input type="hidden" name="action_logout" value="1"></form>
+    <div id="masthead-positioner">
+      {{NAVBAR}}
     </div>
-
-<script type="text/javascript">
-function getInstances() {
-    var xhr = null;
-    try { xhr = new ActiveXObject("Msxml2.XMLHTTP.6.0"); } catch(e) {}
-    try { xhr = xhr || new ActiveXObject("Msxml2.XMLHTTP.3.0"); } catch(e) {}
-    try { xhr = xhr || new ActiveXObject("Microsoft.XMLHTTP"); } catch(e) {}
-    if (!xhr) {
-        xhr = new XMLHttpRequest();
-    }
-    var url = "/get-instants";
-    var list = document.getElementById("instances-list");
-    var loading = document.getElementById("loading");
-    var errorDiv = document.getElementById("error");
-    xhr.open("GET", url, true);
-    xhr.onreadystatechange = function() {
-        if (xhr.readyState === 4) {
-            loading.style.display = "none";
-            if (xhr.status === 200) {
-                var text = xhr.responseText;
-                var items = [];
-                try {
-                    var data = JSON.parse(text);
-                    if (data && data.instants && Array.isArray(data.instants)) {
-                        for (var i = 0; i < data.instants.length; i++) {
-                            var entry = data.instants[i];
-                            if (entry && entry.url && typeof entry.url === "string") {
-                                items.push(entry.url);
-                            }
-                        }
-                    }
-                } catch (e) {
-                    var lines = text.split("\n");
-                    for (var j = 0; j < lines.length; j++) {
-                        var line = lines[j].replace(/^\s+|\s+$/g, "");
-                        if (line !== "" && line.indexOf("http") === 0) {
-                            items.push(line);
-                        }
-                    }
-                }
-                if (items.length === 0) {
-                    list.innerHTML = "<li>No instances available yet</li>";
-                } else {
-                    var html = "";
-                    for (var k = 0; k < items.length; k++) {
-                        var escapedUrl = escapeHtml(items[k]);
-                        html += '<li><a href="' + escapedUrl + '" target="_blank">' + escapedUrl + '</a></li>';
-                    }
-                    list.innerHTML = html;
-                }
-            } else {
-                errorDiv.innerHTML = "Failed to load instances (status: " + xhr.status + ")";
-                errorDiv.style.display = "block";
-            }
-        }
-    };
-    try {
-        xhr.send(null);
-    } catch (e) {
-        loading.style.display = "none";
-        errorDiv.innerHTML = "Request error: " + e.message;
-        errorDiv.style.display = "block";
-    }
-}
-function escapeHtml(text) {
-    var map = {
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#039;'
-    };
-    return text.replace(/[&<>"']/g, function(m) { return map[m]; });
-}
-if (window.attachEvent) {
-    window.attachEvent("onload", getInstances);
-} else if (window.addEventListener) {
-    window.addEventListener("load", getInstances, false);
-} else {
-    var oldonload = window.onload;
-    window.onload = function() {
-        if (typeof oldonload === "function") oldonload();
-        getInstances();
-    };
-}
-</script>
+    <div id="masthead-positioner-height-offset"></div>
+    <div id="page-container">
+      <div id="page" class="home clearfix">
+        {{SIDEBAR}}
+        <div id="alerts" class="content-alignment"></div>
+        <div id="header"></div>
+        <div id="player" class="off-screen"><div id="player-mole-container"><div id="player-unavailable" class="hid"></div><div id="player-api" class="off-screen-target"></div></div></div>
+        <div id="content" class="content-alignment">
+          <div class="branded-page-v2-container branded-page-base-bold-titles branded-page-v2-container-flex-width">
+            <div class="branded-page-v2-col-container">
+              <div class="branded-page-v2-col-container-inner">
+                <div class="branded-page-v2-primary-col">
+                  <div class="branded-page-v2-body branded-page-v2-primary-column-content">
+                    {{MAIN_CONTENT}}
+                  </div>
+                </div>
+                <div class="branded-page-v2-secondary-col">
+                  {{SUBSCRIPTIONS_SIDEBAR}}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="footer-container" class="yt-base-gutter">
+    <div id="footer">
+      <div id="footer-main">
+        <div id="footer-logo"><a href="{{MAIN_URL}}" title="YouTube home"><img src="/assets/images/pixel-vfl3z5WfW.gif" alt="YouTube home"></a></div>
+        <div id="footer-links">
+          <ul id="footer-links-primary">
+            <li><a href="{{MAIN_URL}}/auth/login">Sign in</a></li>
+            <li><a href="{{MAIN_URL}}/docs/">Documentation</a></li>
+            <li><a href="https://github.com/ZendoMusic/yt-api-legacy" target="_blank" rel="noopener">Source code</a></li>
+          </ul>
+          <ul id="footer-links-secondary">
+            <li><span class="copyright">YouTube Legacy API Service &middot; Running on port {{PORT}} &middot; LegacyProjects</span></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="/assets/js/spf-vflSy1p53.js"></script>
+  <script src="/assets/js/base.js"></script>
+  <script src="/assets/js/load-subscriptions.js"></script>
 </body>
 </html>
