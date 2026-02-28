@@ -1,3 +1,293 @@
+/* Root layout: footer after body-container, sticky at bottom when content is short */
+#body {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+}
+
+/* Watch page: undo embed styles (body overflow/height) so page scrolls normally */
+body.watch-page {
+    overflow: visible !important;
+    height: auto !important;
+}
+#body-container {
+    flex: 1 0 auto;
+}
+
+/* Home page: video lists (What to Watch + Recommended) — wrap by rows */
+#page.home .compact-shelf-content-container .yt-uix-shelfslider-body {
+    overflow: visible !important;
+    height: auto !important;
+}
+/* Limit width so items wrap; no height limit (old IE: float fallback) */
+#page.home .branded-page-v2-primary-col {
+    max-width: 100%;
+}
+#page.home .branded-page-v2-body {
+    max-width: 100%;
+}
+#page.home .compact-shelf-content-container,
+#page.home .yt-uix-shelfslider-body {
+    min-width: 0; /* allow shrinking so list wraps in old IE */
+    width: 100%;
+}
+#page.home .yt-uix-shelfslider-list {
+    display: flex;
+    flex-wrap: wrap;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    overflow: hidden; /* contain floats in old IE */
+    width: 100%; /* old IE: give list a width so floated items wrap */
+}
+#page.home .yt-uix-shelfslider-list > li {
+    box-sizing: border-box;
+    width: 175px;
+    margin: 0 12px 24px 0;
+    float: left; /* fallback for old IE (no flex): wrap by row */
+}
+#page.home .yt-uix-shelfslider-list > li:last-child {
+    margin-right: 0;
+}
+/* Old IE: clearfix so list container wraps floats */
+#page.home .yt-uix-shelfslider-list:after {
+    content: "";
+    display: table;
+    clear: both;
+}
+
+/* Home: two columns — main content left, subscriptions right (float so IE doesn't stretch page) */
+#page.home .branded-page-v2-col-container-inner {
+    overflow: hidden; /* contain floated sidebar in IE and modern */
+}
+#page.home .branded-page-v2-secondary-col {
+    float: right;
+    width: 300px;
+    margin-left: 24px;
+    margin-bottom: 24px;
+}
+#page.home .branded-page-v2-primary-col {
+    margin-right: 324px; /* 300px sidebar + 24px gap — keep content left of sidebar in IE */
+    overflow: hidden;
+    min-width: 0;
+}
+/* Modern browsers: use flex when supported, override float layout */
+@supports (display: flex) {
+    #page.home .branded-page-v2-col-container-inner {
+        display: flex;
+        align-items: flex-start;
+        gap: 24px;
+        overflow: visible;
+    }
+    #page.home .branded-page-v2-secondary-col {
+        float: none;
+        margin-left: 0;
+        margin-bottom: 0;
+        flex: 0 0 auto;
+    }
+    #page.home .branded-page-v2-primary-col {
+        margin-right: 0;
+        flex: 1 1 auto;
+    }
+}
+
+/* Right sidebar: Friends O' Mine box */
+#page.home .branded-page-v2-secondary-col .branded-page-box {
+    padding: 15px;
+}
+/* Subscriptions loading: GIF слева, текст "Loading..." в одну строку (без flex, чтобы список каналов не ломался) */
+#subscriptions-sidebar-content.subscriptions-loading-box {
+    min-height: 44px;
+    padding: 12px 0;
+}
+#subscriptions-sidebar-content.subscriptions-loading-box .yt-spinner {
+    margin: 0;
+    display: inline-block;
+    vertical-align: middle;
+}
+#subscriptions-sidebar-content.subscriptions-loading-box .yt-spinner-img {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    vertical-align: middle;
+}
+#subscriptions-sidebar-content.subscriptions-loading-box .yt-spinner-message {
+    display: inline-block;
+    font-size: 13px;
+    color: #666;
+    vertical-align: middle;
+    margin-left: 6px;
+}
+#page.home .branded-page-related-channels-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+#page.home .branded-page-related-channels-item {
+    padding: 8px 0;
+    overflow: hidden;
+}
+#page.home .branded-page-related-channels-item:last-child {
+    border-bottom: 0;
+}
+#page.home .branded-page-related-channels .yt-lockup-thumbnail {
+    float: left;
+    margin-right: 12px;
+}
+#page.home .branded-page-related-channels .yt-lockup-content {
+    overflow: hidden;
+}
+#page.home .branded-page-related-channels .yt-lockup-title {
+    margin: 0 0 2px;
+    font-size: 13px;
+    line-height: 1.3;
+}
+#page.home .branded-page-related-channels .yt-lockup-title a {
+    color: #167ac6;
+    text-decoration: none;
+}
+#page.home .branded-page-related-channels .yt-lockup-title a:hover {
+    text-decoration: underline;
+}
+
+/* Home: logged-out — hide subscriptions, placeholder full width */
+body.home-logged-out #page.home .branded-page-v2-secondary-col {
+    display: none;
+}
+body.home-logged-out #page.home .branded-page-v2-primary-col {
+    margin-right: 0;
+}
+
+/* Home: logged-out placeholder — full width, gray border, text centered horizontally and vertically */
+#page.home .home-logged-out-placeholder {
+    width: 100%;
+    min-height: 320px;
+    height: 320px;
+    box-sizing: border-box;
+    border: 1px solid #ccc;
+    margin: 24px 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+}
+#page.home .home-logged-out-placeholder .home-logged-out-text {
+    margin: 0;
+    font-size: 16px;
+    color: #333;
+}
+
+/* Video card: title link — transparent background */
+.lohp-video-link,
+.yt-lockup-title a {
+    background: transparent !important;
+}
+
+/* Navbar right part when logged in: username, notifications, avatar (IE7-safe) */
+#masthead-user-area .masthead-username,
+#masthead-user-area .masthead-notifications-icon,
+#masthead-user-area .masthead-avatar {
+    display: inline-block;
+    vertical-align: middle;
+}
+#masthead-user-area .masthead-username {
+    margin-right: 12px;
+    font-size: 13px;
+    color: #333;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+#masthead-user-area .masthead-notifications-icon {
+    margin-right: 8px;
+    cursor: pointer;
+    line-height: 0;
+}
+#masthead-user-area .masthead-notifications-icon img {
+    display: block;
+    width: 24px;
+    height: 24px;
+}
+#masthead-user-area .masthead-avatar {
+    line-height: 0;
+}
+#masthead-user-area .masthead-avatar-img {
+    display: block;
+    width: 32px;
+    height: 32px;
+    border: 1px solid #ccc;
+}
+
+/* Account dropdown: light background, no rounding, gray border (IE7-safe) */
+.masthead-account-wrap {
+    position: relative;
+    display: inline-block;
+    vertical-align: middle;
+}
+.masthead-account-menu {
+    display: none;
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 4px;
+    min-width: 260px;
+    background: #fff;
+    border: 1px solid #ccc;
+    padding: 12px 0;
+    z-index: 9999;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+.masthead-menu-user {
+    padding: 0 16px 12px;
+    overflow: hidden;
+}
+.masthead-menu-user .masthead-menu-avatar {
+    display: block;
+    float: left;
+    width: 40px;
+    height: 40px;
+    border: 1px solid #ccc;
+    margin-right: 12px;
+}
+.masthead-menu-user-info {
+    overflow: hidden;
+}
+.masthead-menu-name {
+    display: block;
+    font-weight: bold;
+    color: #202124;
+    font-size: 14px;
+    margin-bottom: 2px;
+}
+.masthead-menu-handle {
+    display: block;
+    font-size: 12px;
+    color: #202124;
+    margin-bottom: 4px;
+}
+.masthead-menu-channel-link {
+    display: inline-block;
+    font-size: 13px;
+}
+.masthead-menu-sep {
+    height: 1px;
+    background: #e0e0e0;
+    margin: 8px 0;
+}
+.masthead-menu-item {
+    display: block;
+    padding: 10px 16px;
+    color: #202124;
+    text-decoration: none;
+    font-size: 13px;
+    clear: both;
+    overflow: hidden;
+}
+.masthead-menu-item:hover {
+    background: #f5f5f5;
+}
+
 /* Guide (sidebar) toggle: hidden when body has class guide-closed */
 body.guide-closed #guide {
     display: none !important;
@@ -28,6 +318,36 @@ body.guide-closed #guide {
 .search .yt-lockup-thumbnail .yt-uix-simple-thumb-wrap img,
 .search .yt-lockup-thumbnail .yt-uix-simple-thumb-related img {
     object-fit: cover;
+}
+
+/* Login page: QR / user code box (IE7-safe: no flexbox) */
+.auth-qr-box {
+    padding: 24px;
+    text-align: center;
+    min-height: 120px;
+}
+.auth-qr-box img {
+    display: block;
+    margin: 12px auto;
+}
+.auth-description {
+    margin: 0 0 16px;
+    color: #555;
+}
+.auth-footer {
+    margin-top: 20px;
+    font-size: 13px;
+}
+.auth-success {
+    color: #0a0;
+    font-weight: bold;
+}
+.auth-error {
+    color: #c00;
+}
+.auth-user-code strong {
+    font-size: 18px;
+    letter-spacing: 2px;
 }
 
 /* Comment author icons (like yt2014) */
@@ -79,6 +399,15 @@ body.guide-closed #guide {
     color: #333;
 }
 
+/* Home: large shelf — metadata block at bottom (like yt2014) */
+.lohp-large-shelf-container {
+    display: flex;
+    flex-direction: column;
+}
+.lohp-large-shelf-container .lohp-video-metadata {
+    margin-top: auto;
+}
+
 /* Channel: show all video rows (like yt2014), not just first row */
 #c4-shelves-container .yt-uix-shelfslider-body {
     overflow: visible !important;
@@ -94,4 +423,101 @@ body.guide-closed #guide {
     content: "";
     display: table;
     clear: both;
+}
+
+/* Sidebar "Service" block: port, instances, links (root page) */
+.guide-section-service .guide-service-tech {
+    font-size: 12px;
+    line-height: 1.4;
+    color: #333;
+    padding: 4px 0;
+}
+.guide-section-service .guide-tech-line {
+    margin: 6px 0 2px;
+    padding: 0;
+}
+.guide-section-service .guide-tech-line:first-child {
+    margin-top: 0;
+}
+.guide-section-service .guide-tech-list {
+    margin: 4px 0 8px;
+    padding-left: 18px;
+    list-style: disc;
+}
+.guide-section-service .guide-tech-list a {
+    color: #167ac6;
+    text-decoration: none;
+}
+.guide-section-service .guide-tech-list a:hover {
+    text-decoration: underline;
+}
+.guide-section-service .guide-tech-line a {
+    color: #167ac6;
+    text-decoration: none;
+}
+.guide-section-service .guide-tech-line a:hover {
+    text-decoration: underline;
+}
+
+/* Watch: Share panel — link + Copy link button */
+.share-panel-url-container {
+    margin-top: 4px;
+    overflow: hidden;
+}
+.share-panel-url-container .share-panel-url {
+    display: inline-block;
+    width: 100%;
+    max-width: calc(100% - 90px);
+    vertical-align: middle;
+    margin-right: 8px;
+}
+.share-panel-url-container .share-copy-link-btn {
+    display: inline-block;
+    vertical-align: middle;
+}
+
+/* Add to: Sign in clickcard (watch page) */
+.yt-uix-clickcard-card.addto-signin-clickcard {
+    width: 320px;
+    min-height: 120px;
+}
+.yt-uix-clickcard-card-border {
+    border: 1px solid #ccc;
+    background: #fff;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    border-radius: 2px;
+}
+.yt-uix-clickcard-card-body {
+    padding: 12px 14px;
+    position: relative;
+}
+.watch7-hovercard-header {
+    margin: 0 0 8px;
+    font-size: 14px;
+    font-weight: bold;
+    color: #333;
+}
+.watch7-hovercard-message {
+    font-size: 12px;
+    color: #333;
+    line-height: 1.4;
+    margin-bottom: 10px;
+}
+.watch7-hovercard-message .yt-user-name {
+    font-weight: bold;
+    color: #167ac6;
+}
+.watch7-hovercard-account-line .yt-uix-button {
+    display: inline-block;
+    padding: 6px 12px;
+    background: #167ac6;
+    color: #fff;
+    text-decoration: none;
+    font-size: 12px;
+    border-radius: 2px;
+    border: none;
+    cursor: pointer;
+}
+.watch7-hovercard-account-line .yt-uix-button:hover {
+    background: #145a9e;
 }
