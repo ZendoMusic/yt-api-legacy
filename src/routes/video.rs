@@ -4,6 +4,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use std::io::Read;
 use std::process::Stdio;
+use std::env;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use html_escape::decode_html_entities;
@@ -1005,7 +1006,7 @@ fn stream_ffmpeg_merged_response(video_url: &str, audio_url: &str) -> HttpRespon
         .streaming(stream)
 }
 
-/// Converts video to specified codec - full streaming for both codecs
+/// Converts video to specified codec - writes to temp file, then streams
 fn stream_converted_video(
     source_url: &str,
     user_agent: &str,
@@ -1018,7 +1019,20 @@ fn stream_converted_video(
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
 
     std::thread::spawn(move || {
-        // Build FFmpeg command - HTTP input with headers, pipe output
+        // Create a unique temporary file path
+        let temp_dir = env::temp_dir();
+        let temp_file_name = format!(
+            "yt_api_video_{}_{}.{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            std::process::id(),
+            if codec_str == "mpeg4" { "mp4" } else { "3gp" }
+        );
+        let temp_file_path = temp_dir.join(temp_file_name);
+
+        // Build FFmpeg command - HTTP input with headers, file output
         let mut cmd = Command::new("ffmpeg");
         cmd.args([
             "-hide_banner", "-loglevel", "error", "-nostdin",
@@ -1032,70 +1046,77 @@ fn stream_converted_video(
         ]);
 
         if codec_str == "mpeg4" {
-            // MPEG-4 Visual conversion
             cmd.args([
-                "-c:v", "mpeg4", "-b:v", "501k", "-c:a", "copy",
-                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-                "-f", "mp4", "pipe:1",
+                "-c:v", "mpeg4", "-vtag", "mp4v", "-b:v", "501k",
+                "-brand", "isom", "-pix_fmt", "yuv420p",
+                "-c:a", "copy", "-f", "mp4",
             ]);
         } else {
-            // H.263 conversion - pipe output
             cmd.args([
                 "-c:v", "h263", "-vf", "scale=352:288",
                 "-c:a", "libopencore_amrnb", "-ar", "8000", "-ac", "1",
-				"-movflags", "frag_keyframe+empty_moov+default_base_moof",
-                "-f", "3gp", "pipe:1",
+                "-f", "3gp",
             ]);
         }
 
+        // Output to temporary file
+        let temp_path_str = temp_file_path.to_string_lossy().to_string();
+        cmd.arg(&temp_path_str);
+
         cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
+        // Run FFmpeg and wait for completion
+        let output = match cmd.output() {
+            Ok(o) => o,
             Err(e) => {
                 let _ = tx.blocking_send(Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     format!("FFmpeg failed to start: {}", e)
                 )));
+                // Clean up temp file if it exists
+                let _ = fs::remove_file(&temp_file_path);
                 return;
             }
         };
 
-        // Read converted output from FFmpeg stdout and stream directly
-        if let Some(mut stdout) = child.stdout.take() {
-            let mut out_buffer = [0u8; 65536];
-            loop {
-                match stdout.read(&mut out_buffer) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if tx.blocking_send(Ok(Bytes::copy_from_slice(&out_buffer[..n]))).is_err() {
-                            let _ = child.kill();
+        if !output.status.success() {
+            let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            log::error!("FFmpeg conversion failed: {}", err_msg);
+            let _ = tx.blocking_send(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("FFmpeg conversion failed: {}", err_msg)
+            )));
+            let _ = fs::remove_file(&temp_file_path);
+            return;
+        }
+
+        // Read the temp file and stream its contents
+        match fs::File::open(&temp_file_path) {
+            Ok(mut file) => {
+                let mut buffer = [0u8; 65536];
+                loop {
+                    match file.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if tx.blocking_send(Ok(Bytes::copy_from_slice(&buffer[..n]))).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.blocking_send(Err(e));
                             break;
                         }
                     }
-                    Err(e) => {
-                        let _ = tx.blocking_send(Err(e));
-                        let _ = child.kill();
-                        break;
-                    }
                 }
+            }
+            Err(e) => {
+                let _ = tx.blocking_send(Err(e));
             }
         }
 
-        // Check FFmpeg exit status
-        if let Ok(exit_status) = child.wait() {
-            if !exit_status.success() {
-                if let Some(mut stderr) = child.stderr.take() {
-                    let mut err_buf = Vec::new();
-                    if stderr.read_to_end(&mut err_buf).is_ok() {
-                        let err_msg = String::from_utf8_lossy(&err_buf).to_string();
-                        log::error!("FFmpeg conversion failed: {}", err_msg);
-                    }
-                }
-            }
-        }
+        // Clean up temp file after streaming
+        let _ = fs::remove_file(&temp_file_path);
     });
 
     let mime_type = if codec == "mpeg4" { "video/mp4" } else { "video/3gpp" };
