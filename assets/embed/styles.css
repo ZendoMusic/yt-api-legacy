@@ -121,12 +121,9 @@ video {
   z-index: 100;
   opacity: 1;
   font-family: Arial, Helvetica, sans-serif;
-  transition: opacity 150ms ease-in-out, transform 250ms ease-in-out;
-  -webkit-transition: opacity 150ms ease-in-out, -webkit-transform 250ms ease-in-out;
-  -ms-transition: opacity 150ms ease-in-out, -ms-transform 250ms ease-in-out;
-  transform: translateY(0);
-  -webkit-transform: translateY(0);
-  -ms-transform: translateY(0);
+  transition: opacity 250ms ease-in-out;
+  -webkit-transition: opacity 250ms ease-in-out;
+  -ms-transition: opacity 250ms ease-in-out;
   background: rgb(28, 28, 28);
   border-top: 2px solid #181818;
   padding-bottom: 2px;
@@ -139,9 +136,6 @@ video {
 .video-container:hover .video-controls-container,
 .video-container.paused .video-controls-container {
   opacity: 1;
-  transform: translateY(0);
-  -webkit-transform: translateY(0);
-  -ms-transform: translateY(0);
   pointer-events: auto;
 }
 
@@ -151,10 +145,21 @@ video {
 
 .video-container.hide-controls .video-controls-container {
   opacity: 0;
-  transform: translateY(100%);
-  -webkit-transform: translateY(100%);
-  -ms-transform: translateY(100%);
   pointer-events: none;
+}
+
+/* Overlay above video: receives pointer when controls hidden (modern browsers throttle mousemove on video) */
+.video-activity-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  pointer-events: none;
+}
+.video-container.hide-controls .video-activity-overlay {
+  pointer-events: auto;
 }
 
 .video-controls-container .controls {
@@ -226,6 +231,97 @@ html.ie-fullscreen body .video-container .open {
   display: none !important;
 }
 
+/* Settings button (same size as other control buttons) */
+.video-controls-container .controls button.settings-btn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+}
+.video-controls-container .controls button.settings-btn img {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Settings panel: above controls, dark background (IE-safe: no flexbox) */
+.video-container .settings-panel {
+  display: none;
+  position: absolute;
+  bottom: 100%;
+  right: 0;
+  margin-bottom: 2px;
+  width: 220px;
+  background: rgb(40, 40, 40);
+  border: 1px solid #555;
+  padding: 10px 12px;
+  z-index: 200;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+.video-container .settings-panel.settings-panel-open {
+  display: block;
+}
+
+.video-container .settings-row {
+  overflow: hidden;
+  padding: 6px 0;
+  border-bottom: 1px solid #333;
+}
+.video-container .settings-row:last-child {
+  border-bottom: 0;
+}
+
+.video-container .settings-label {
+  float: left;
+  color: #aaa;
+  font-size: 12px;
+  line-height: 28px;
+  margin: 0;
+}
+
+.video-container .settings-annotations {
+  float: right;
+}
+.video-container .settings-annot-btn {
+  display: inline-block;
+  width: 40px;
+  height: 26px;
+  margin-left: 2px;
+  padding: 0;
+  border: 1px solid #555;
+  background: #2a2a2a;
+  color: #aaa;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: Arial, Helvetica, sans-serif;
+}
+.video-container .settings-annot-btn.active {
+  background: #555;
+  color: #fff;
+  border-color: #666;
+}
+.video-container .settings-annot-btn:hover {
+  background: #444;
+  color: #fff;
+}
+
+.video-container .settings-speed,
+.video-container .settings-quality {
+  float: right;
+  width: 110px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid #555;
+  background: #3a3a3a;
+  color: #ddd;
+  font-size: 12px;
+  font-family: Arial, Helvetica, sans-serif;
+  cursor: pointer;
+}
+.video-container .settings-speed option,
+.video-container .settings-quality option {
+  background: #2a2a2a;
+  color: #ddd;
+}
 
 
 .volume-high-icon,

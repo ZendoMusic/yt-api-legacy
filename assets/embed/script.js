@@ -4,7 +4,8 @@ var fullScreenBtn = document.querySelector(".full-screen-btn");
 var miniPlayerBtn = document.querySelector(".mini-player-btn");
 var muteBtn = document.querySelector(".mute-btn");
 var captionsBtn = document.querySelector(".captions-btn");
-var speedBtn = document.querySelector(".speed-btn");
+var settingsBtn = document.querySelector(".settings-btn");
+var settingsPanel = document.querySelector(".settings-panel");
 var currentTimeElem = document.querySelector(".current-time");
 var totalTimeElem = document.querySelector(".total-time");
 var volumeSlider = document.querySelector(".volume-slider");
@@ -83,6 +84,11 @@ function isInFullscreen() {
   );
 }
 
+/** IE8-safe trim (String.prototype.trim not in IE8) */
+function strTrim(s) {
+  return s ? s.replace(/^\s+|\s+$/g, "") : s;
+}
+
 /* ===========================
    ESC EMULATION
 =========================== */
@@ -122,9 +128,9 @@ function exitIEFullscreen() {
   var html = document.documentElement;
   var body = document.body;
 
-  html.className = html.className.replace(/\bie-fullscreen\b/g, "").trim();
-  body.className = body.className.replace(/\bie-fullscreen\b/g, "").trim();
-  videoContainer.className = videoContainer.className.replace(/\bfull-screen\b/g, "").trim();
+  html.className = strTrim(html.className.replace(/\bie-fullscreen\b/g, ""));
+  body.className = strTrim(body.className.replace(/\bie-fullscreen\b/g, ""));
+  videoContainer.className = strTrim(videoContainer.className.replace(/\bfull-screen\b/g, ""));
 
   html.style.overflow = "";
   body.style.overflow = "";
@@ -139,21 +145,32 @@ function exitIEFullscreen() {
 
 function toggleFullScreenMode() {
   if (isInFullscreen()) {
-    // ❗ выход ТОЛЬКО через ESC
-    simulateEscapeKey();
+    try { simulateEscapeKey(); } catch (e) {}
     exitNativeFullscreen();
     exitIEFullscreen();
   } else {
-    // вход БЕЗ ESC
     try {
       requestFullscreen(videoContainer);
     } catch (e) {
       enterIEFullscreen();
+      return;
     }
+    /* Old IE: requestFullscreen does nothing and doesn't throw. After a tick, if still not fullscreen, use IE fallback. */
+    setTimeout(function () {
+      if (!isInFullscreen()) {
+        enterIEFullscreen();
+      }
+    }, 100);
   }
 }
 
-fullScreenBtn.addEventListener("click", toggleFullScreenMode);
+if (fullScreenBtn) {
+  if (fullScreenBtn.attachEvent) {
+    fullScreenBtn.attachEvent("onclick", toggleFullScreenMode);
+  } else {
+    fullScreenBtn.addEventListener("click", toggleFullScreenMode);
+  }
+}
 
 /* ===========================
    SYNC FULLSCREEN CLASS
@@ -169,7 +186,7 @@ function syncFullscreenClass() {
     if (videoContainer.className.indexOf("full-screen") === -1)
       videoContainer.className += " full-screen";
   } else {
-    videoContainer.className = videoContainer.className.replace(/\bfull-screen\b/g, "").trim();
+    videoContainer.className = strTrim(videoContainer.className.replace(/\bfull-screen\b/g, ""));
   }
 }
 
@@ -384,15 +401,106 @@ video.addEventListener("error", function () {
 });
 
 /* ===========================
-   SPEED
+   SETTINGS PANEL (IE-safe: addEventListener + attachEvent, className)
 =========================== */
 
-speedBtn.addEventListener("click", function () {
-  var rate = video.playbackRate + 0.25;
-  if (rate > 2) rate = 0.25;
-  video.playbackRate = rate;
-  speedBtn.innerHTML = rate + "x";
-});
+function addClick(el, fn) {
+  if (!el) return;
+  if (el.attachEvent) el.attachEvent("onclick", fn);
+  else el.addEventListener("click", fn);
+}
+
+function toggleSettingsPanel(e) {
+  if (e && e.stopPropagation) e.stopPropagation();
+  if (e && e.cancelBubble !== undefined) e.cancelBubble = true;
+  if (hasClass(settingsPanel, "settings-panel-open")) {
+    removeClass(settingsPanel, "settings-panel-open");
+  } else {
+    addClass(settingsPanel, "settings-panel-open");
+  }
+}
+
+function closeSettingsPanelIfOutside(e) {
+  var t = e.target || e.srcElement;
+  if (!settingsPanel || !hasClass(settingsPanel, "settings-panel-open")) return;
+  while (t && t !== document.body) {
+    if (t === settingsPanel || t === settingsBtn) return;
+    t = t.parentNode;
+  }
+  removeClass(settingsPanel, "settings-panel-open");
+}
+
+if (settingsBtn && settingsPanel) {
+  addClick(settingsBtn, function (e) {
+    toggleSettingsPanel(e);
+  });
+  if (document.attachEvent) {
+    document.attachEvent("onclick", closeSettingsPanelIfOutside);
+  } else {
+    document.addEventListener("click", closeSettingsPanelIfOutside);
+  }
+}
+
+if (settingsPanel) {
+  addClick(settingsPanel, function (e) {
+    if (e && e.stopPropagation) e.stopPropagation();
+    if (e && e.cancelBubble !== undefined) e.cancelBubble = true;
+  });
+  var annotBtns = settingsPanel.querySelectorAll(".settings-annot-btn");
+  for (var i = 0; i < annotBtns.length; i++) {
+    (function (btn) {
+      addClick(btn, function () {
+        var parent = btn.parentNode;
+        var siblings = parent.querySelectorAll(".settings-annot-btn");
+        for (var j = 0; j < siblings.length; j++) {
+          removeClass(siblings[j], "active");
+        }
+        addClass(btn, "active");
+      });
+    })(annotBtns[i]);
+  }
+  var speedSelect = settingsPanel.querySelector(".settings-speed");
+  if (speedSelect) {
+    if (speedSelect.attachEvent) {
+      speedSelect.attachEvent("onchange", function () {
+        var val = parseFloat(speedSelect.value, 10);
+        if (!isNaN(val)) video.playbackRate = val;
+      });
+    } else {
+      speedSelect.addEventListener("change", function () {
+        var val = parseFloat(speedSelect.value, 10);
+        if (!isNaN(val)) video.playbackRate = val;
+      });
+    }
+  }
+  var qualitySelect = settingsPanel.querySelector(".settings-quality");
+  if (qualitySelect) {
+    function applyQuality() {
+      var val = qualitySelect.value;
+      var src = video.src || video.getAttribute("src") || "";
+      if (!src) return;
+      src = src.replace(/\bquality=[^&]*&?/g, "").replace(/[&?]$/, "");
+      var sep = src.indexOf("?") >= 0 ? "&" : "?";
+      var wasPlaying = !video.paused;
+      var seekTo = video.currentTime;
+      video.src = src + sep + "quality=" + val;
+      video.load();
+      function restorePlay() {
+        video.removeEventListener("loadedmetadata", restorePlay);
+        video.removeEventListener("canplay", restorePlay);
+        if (seekTo > 0) video.currentTime = seekTo;
+        if (wasPlaying) video.play();
+      }
+      video.addEventListener("loadedmetadata", restorePlay);
+      video.addEventListener("canplay", restorePlay);
+    }
+    if (qualitySelect.attachEvent) {
+      qualitySelect.attachEvent("onchange", applyQuality);
+    } else {
+      qualitySelect.addEventListener("change", applyQuality);
+    }
+  }
+}
 
 /* ===========================
    MUTE / VOLUME
@@ -580,6 +688,32 @@ function handleUserActivity() {
   resetInactivityTimer();
 }
 
-["mousemove", "mousedown", "touchstart", "touchmove", "keydown", "wheel", "mousewheel", "pointermove", "pointerdown", "MSPointerMove", "MSPointerDown"].forEach(function (eventName) {
+var userActivityEvents = ["mousemove", "mousedown", "touchstart", "touchmove", "keydown", "wheel", "mousewheel", "pointermove", "pointerdown", "MSPointerMove", "MSPointerDown"];
+
+userActivityEvents.forEach(function (eventName) {
   document.addEventListener(eventName, handleUserActivity, true);
 });
+
+var activityOverlay = document.querySelector(".video-activity-overlay");
+if (videoContainer) {
+  userActivityEvents.forEach(function (eventName) {
+    videoContainer.addEventListener(eventName, handleUserActivity, true);
+  });
+  videoContainer.addEventListener("mouseenter", handleUserActivity, true);
+}
+if (activityOverlay) {
+  userActivityEvents.forEach(function (eventName) {
+    activityOverlay.addEventListener(eventName, handleUserActivity, true);
+  });
+  activityOverlay.addEventListener("click", function (e) {
+    var wasHidden = hasClass(videoContainer, "hide-controls");
+    handleUserActivity();
+    if (wasHidden && video) {
+      try {
+        var ev = document.createEvent("MouseEvents");
+        ev.initEvent("click", true, true);
+        video.dispatchEvent(ev);
+      } catch (err) {}
+    }
+  }, true);
+}
