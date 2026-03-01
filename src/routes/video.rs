@@ -2,7 +2,7 @@ use actix_web::http::header::{HeaderValue, CONTENT_LENGTH, CONTENT_RANGE, CONTEN
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use bytes::Bytes;
 use futures_util::StreamExt;
-use std::io::Read;
+use std::io::{Read, Seek, Write};
 use std::process::Stdio;
 use std::env;
 use tokio::sync::mpsc;
@@ -18,8 +18,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::task;
 use urlencoding;
@@ -48,7 +49,6 @@ fn extract_ytcfg(html: &str) -> serde_json::Value {
 }
 
 fn extract_initial_player_response(html: &str) -> serde_json::Value {
-    // Try multiple patterns like in the Python script
     let patterns = [
         r"ytInitialPlayerResponse\s*=\s*(\{.+?\});",
         r"window\['ytInitialPlayerResponse'\]\s*=\s*(\{.+?\});",
@@ -68,8 +68,6 @@ fn extract_initial_player_response(html: &str) -> serde_json::Value {
 }
 
 fn get_comments_token(data: &serde_json::Value) -> Option<String> {
-    // Try to find the comment section and extract continuation token
-    // This mimics the Python logic
     if let Some(contents) = data
         .get("contents")
         .and_then(|c| c.get("twoColumnWatchNextResults"))
@@ -80,7 +78,6 @@ fn get_comments_token(data: &serde_json::Value) -> Option<String> {
     {
         for item in contents {
             if let Some(item_section) = item.get("itemSectionRenderer") {
-                // Check if this is the comment section
                 if item_section
                     .get("sectionIdentifier")
                     .and_then(|s| s.as_str())
@@ -121,7 +118,6 @@ fn simplify_text(node: &serde_json::Value) -> String {
         return simple_text.to_string();
     }
     if let Some(runs) = node.get("runs").and_then(|r| r.as_array()) {
-        // More efficient string collection without intermediate vector
         let mut result = String::new();
         for run in runs {
             if let Some(text) = run.get("text").and_then(|t| t.as_str()) {
@@ -179,8 +175,6 @@ fn search_number_near(data: &serde_json::Value, words: &[&str]) -> String {
 }
 
 fn find_likes(next_data: &serde_json::Value) -> String {
-    // Follow the exact Python script logic
-    // Navigate to: next_data["contents"]["twoColumnWatchNextResults"]["results"]["results"]["contents"][0]["videoPrimaryInfoRenderer"]["videoActions"]["menuRenderer"]["topLevelButtons"][0]["segmentedLikeDislikeButtonViewModel"]
     if let Some(contents) = next_data
         .get("contents")
         .and_then(|c| c.get("twoColumnWatchNextResults"))
@@ -196,12 +190,10 @@ fn find_likes(next_data: &serde_json::Value) -> String {
                         if let Some(top_level_buttons) = menu_renderer.get("topLevelButtons").and_then(|btns| btns.as_array()) {
                             if !top_level_buttons.is_empty() {
                                 if let Some(button) = top_level_buttons[0].get("segmentedLikeDislikeButtonViewModel") {
-                                    // Now navigate to: likeButtonViewModel.likeButtonViewModel.toggleButtonViewModel.toggleButtonViewModel
                                     if let Some(like_button_vm) = button.get("likeButtonViewModel") {
                                         if let Some(like_button_vm2) = like_button_vm.get("likeButtonViewModel") {
                                             if let Some(toggle_button_vm) = like_button_vm2.get("toggleButtonViewModel") {
                                                 if let Some(toggle_button_vm2) = toggle_button_vm.get("toggleButtonViewModel") {
-                                                    // 1. Try toggledButtonViewModel (like in Python script)
                                                     if let Some(toggled_btn) = toggle_button_vm2.get("toggledButtonViewModel") {
                                                         if let Some(button_vm) = toggled_btn.get("buttonViewModel",) {
                                                             if let Some(title) = button_vm.get("title").and_then(|t| t.as_str()) {
@@ -211,16 +203,13 @@ fn find_likes(next_data: &serde_json::Value) -> String {
                                                                 }
                                                             }
                                                             
-                                                            // Also try accessibilityText from toggled button
                                                             if let Some(acc_text) = button_vm.get("accessibilityText").and_then(|t| t.as_str()) {
                                                                 if !acc_text.is_empty() {
-                                                                    // Try pattern "along with X other"
                                                                     if let Some(caps) = regex::Regex::new(r"along with ([\d, ]*) other").unwrap().captures(acc_text) {
                                                                         let num = caps[1].replace(",", "").replace(" ", "");
                                                                         println!("DEBUG: взято из accessibility = {}", num);
                                                                         return num;
                                                                     }
-                                                                    // Try general digit pattern
                                                                     if let Some(caps) = regex::Regex::new(r"(\d[\d, ]*)").unwrap().captures(acc_text) {
                                                                         return parse_human_number(&caps[1]);
                                                                     }
@@ -229,7 +218,6 @@ fn find_likes(next_data: &serde_json::Value) -> String {
                                                         }
                                                     }
                                                     
-                                                    // 2. Try defaultButtonViewModel (like in Python script)
                                                     if let Some(default_btn) = toggle_button_vm2.get("defaultButtonViewModel") {
                                                         if let Some(button_vm) = default_btn.get("buttonViewModel") {
                                                             if let Some(title) = button_vm.get("title").and_then(|t| t.as_str()) {
@@ -239,16 +227,13 @@ fn find_likes(next_data: &serde_json::Value) -> String {
                                                                 }
                                                             }
                                                             
-                                                            // Also try accessibilityText from default button
                                                             if let Some(acc_text) = button_vm.get("accessibilityText").and_then(|t| t.as_str()) {
                                                                 if !acc_text.is_empty() {
-                                                                    // Try pattern "along with X other"
                                                                     if let Some(caps) = regex::Regex::new(r"along with ([\d, ]*) other").unwrap().captures(acc_text) {
                                                                         let num = caps[1].replace(",", "").replace(" ", "");
                                                                         println!("DEBUG: взято из accessibility = {}", num);
                                                                         return num;
                                                                     }
-                                                                    // Try general digit pattern
                                                                     if let Some(caps) = regex::Regex::new(r"(\d[\d, ]*)").unwrap().captures(acc_text) {
                                                                         return parse_human_number(&caps[1]);
                                                                     }
@@ -269,7 +254,6 @@ fn find_likes(next_data: &serde_json::Value) -> String {
         }
     }
     
-    // Fallback to the old method
     if let Some(micro) = next_data
         .get("microformat")
         .and_then(|m| m.get("playerMicroformatRenderer"))
@@ -279,7 +263,6 @@ fn find_likes(next_data: &serde_json::Value) -> String {
         }
     }
     
-    // Final fallback: search near like-related text
     search_number_near(next_data, &["like", "likes", "лайк", "лайков", "лайка"])
 }
 
@@ -291,14 +274,12 @@ fn parse_human_number(s: &str) -> String {
     let trimmed = s.trim();
     let mut cleaned = String::with_capacity(trimmed.len());
     
-    // More efficient character processing without multiple allocations
     for c in trimmed.chars() {
         if c != ',' && c != ' ' {
             cleaned.push(c.to_ascii_uppercase());
         }
     }
     
-    // Check for multipliers more efficiently
     if cleaned.len() > 1 {
         let last_char = cleaned.chars().last().unwrap();
         if last_char.is_alphabetic() {
@@ -324,7 +305,6 @@ fn parse_human_number(s: &str) -> String {
         }
     }
     
-    // Extract digits only more efficiently
     let mut result = String::new();
     for c in cleaned.chars() {
         if c.is_ascii_digit() {
@@ -335,8 +315,6 @@ fn parse_human_number(s: &str) -> String {
 }
 
 fn find_subscriber_count(nd: &serde_json::Value) -> String {
-    // Look for subscriber count in next response
-    // Path: contents.twoColumnWatchNextResults.results.results.contents[1].videoSecondaryInfoRenderer.owner.videoOwnerRenderer.subscriberCountText.simpleText
     
     if let Some(contents) = nd.get("contents") {
         if let Some(two_col) = contents.get("twoColumnWatchNextResults") {
@@ -350,21 +328,15 @@ fn find_subscriber_count(nd: &serde_json::Value) -> String {
                                 if let Some(owner) = video_secondary.get("owner") {
                                     if let Some(video_owner) = owner.get("videoOwnerRenderer") {
                                         if let Some(sub_text) = video_owner.get("subscriberCountText") {
-                                            // Try simpleText first
                                             let text = sub_text
                                                 .get("simpleText")
                                                 .and_then(|t| t.as_str())
                                                 .or_else(|| {
-                                                    // Fallback: runs[0].text (YouTube sometimes uses runs)
                                                     sub_text.get("runs").and_then(|r| r.as_array()).and_then(|arr| arr.first()).and_then(|r| r.get("text").and_then(|t| t.as_str()))
                                                 });
                                             if let Some(simple_text) = text {
-                                                // Extract numeric part and convert K/M abbreviations
                                                 let cleaned = simple_text.replace(" подписчиков", "").replace(" подписчик", "").replace(" subscribers", "").replace(" subscriber", "");
                                                 
-                                                // Handle various formats including Russian abbreviations
-                                                // Russian: тыс (thousand), млн (million)
-                                                // English: K (thousand), M (million)
                                                 let re = regex::Regex::new(r"([\d,]+\.?\d*)\s*(млн|тыс|[KM]?)").unwrap();
                                                 if let Some(captures) = re.captures(&cleaned) {
                                                     let number_part = &captures[1].replace(",", "").replace(".", ""); // Remove commas and dots
@@ -381,7 +353,6 @@ fn find_subscriber_count(nd: &serde_json::Value) -> String {
                                                         return result.to_string();
                                                     }
                                                 }
-                                                // If no multiplier matched, try digits only (e.g. "199")
                                                 let digits: String = cleaned.chars().filter(|c| c.is_ascii_digit()).collect();
                                                 if !digits.is_empty() {
                                                     return digits;
@@ -403,8 +374,6 @@ fn find_subscriber_count(nd: &serde_json::Value) -> String {
 }
 
 fn find_comments_count(pr: &serde_json::Value, nd: &serde_json::Value) -> String {
-    // First try the Python script approach
-    // Look for engagement panels like in Python
     if let Some(panels) = nd.get("engagementPanels").and_then(|p| p.as_array()) {
         for panel in panels {
             if let Some(panel_renderer) = panel.get("engagementPanelSectionListRenderer") {
@@ -416,7 +385,6 @@ fn find_comments_count(pr: &serde_json::Value, nd: &serde_json::Value) -> String
                                     if let Some(runs) = contextual_info.get("runs").and_then(|r| r.as_array()) {
                                         if !runs.is_empty() {
                                             if let Some(first_run) = runs[0].get("text").and_then(|t| t.as_str()) {
-                                                // Extract numbers from the text
                                                 let result = first_run.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
                                                 if !result.is_empty() {
                                                     return result;
@@ -433,26 +401,17 @@ fn find_comments_count(pr: &serde_json::Value, nd: &serde_json::Value) -> String
         }
     }
     
-    // Fallback to the original approach
     for d in [pr, nd] {
         if d.is_null() {
             continue;
         }
-        // Exact match of Python logic:
-        // for ct in recursive_find(d, "commentCountText") + recursive_find(d, "countText"):
-        //     text = (
-        //         ct.get("simpleText") or
-        //         ct.get("runs", [{}])[0].get("text", "")
-        //     )
         
         let comment_texts = recursive_find(d, "commentCountText");
         let count_texts = recursive_find(d, "countText");
         
-        // Combine both lists like in Python (concatenation)
         let all_texts: Vec<&serde_json::Value> = comment_texts.iter().chain(count_texts.iter()).collect();
         
         for ct in all_texts {
-            // Exact match of Python logic for text extraction
             let text = ct
                 .get("simpleText")
                 .and_then(|st| st.as_str())
@@ -472,14 +431,12 @@ fn find_comments_count(pr: &serde_json::Value, nd: &serde_json::Value) -> String
             }
         }
     }
-    // Fallback: search near comment-related text (like Python)
     search_number_near(nd, &["comment", "comments", "коммент", "коммента"])
 }
 
 fn translate_russian_time(time_str: &str) -> String {
     let time_lower = time_str.to_lowercase();
     
-    // Russian to English translations
     let translations = [
         ("несколько секунд назад", "a few seconds ago"),
         ("секунду назад", "a second ago"),
@@ -507,7 +464,6 @@ fn translate_russian_time(time_str: &str) -> String {
     for (russian, english) in &translations {
         if time_lower.contains(russian) {
             result = result.replace(russian, english);
-            // Also try capitalized version
             let capitalized_russian = format!("{}{}", 
                 russian.chars().next().unwrap().to_uppercase().collect::<String>(),
                 &russian[1..]
@@ -528,7 +484,6 @@ fn extract_comments(data: &serde_json::Value, base_url: &str) -> Vec<Comment> {
                 let p = &obj_map["commentEntityPayload"];
                 let props = p.get("properties").unwrap_or(&serde_json::Value::Null);
                 
-                // Extract author - try multiple paths like in Python script
                 let author = p
                     .get("author")
                     .and_then(|a| a.get("displayName"))
@@ -538,12 +493,10 @@ fn extract_comments(data: &serde_json::Value, base_url: &str) -> Vec<Comment> {
                     .unwrap_or("Unknown")
                     .to_string();
                 
-                // Extract text content - try both direct content and runs like in Python
                 let text = if let Some(content_obj) = p.get("properties").and_then(|props| props.get("content")) {
                     if let Some(content_str) = content_obj.get("content").and_then(|c| c.as_str()) {
                         content_str.to_string()
                     } else if let Some(runs) = content_obj.get("runs").and_then(|r| r.as_array()) {
-                        // More efficient string building without intermediate vector
                         let mut text = String::new();
                         for run in runs {
                             if let Some(run_text) = run.get("text").and_then(|t| t.as_str()) {
@@ -555,10 +508,8 @@ fn extract_comments(data: &serde_json::Value, base_url: &str) -> Vec<Comment> {
                         String::new()
                     }
                 } else {
-                    // Alternative extraction path like Python
                     let content = props.get("content").unwrap_or(&serde_json::Value::Null);
                     if let Some(runs) = content.get("runs").and_then(|r| r.as_array()) {
-                        // More efficient string building without intermediate vector
                         let mut text = String::new();
                         for run in runs {
                             if let Some(run_text) = run.get("text").and_then(|t| t.as_str()) {
@@ -572,16 +523,13 @@ fn extract_comments(data: &serde_json::Value, base_url: &str) -> Vec<Comment> {
                 };
                 
                 if !text.trim().is_empty() {
-                    // Extract published time
                     let published_at_raw = props
                         .get("publishedTime")
                         .and_then(|p| p.as_str())
                         .unwrap_or("unknown");
                     
-                    // Translate Russian time expressions to English (avoid cloning if not needed)
                     let published_at = translate_russian_time(published_at_raw);
                     
-                    // Extract author thumbnail
                     let author_thumbnail_raw = p
                         .get("avatar")
                         .and_then(|a| a.get("image"))
@@ -592,7 +540,6 @@ fn extract_comments(data: &serde_json::Value, base_url: &str) -> Vec<Comment> {
                         .and_then(|u| u.as_str())
                         .unwrap_or("");
                     
-                    // Transform direct image URL to use /channel_icon/ endpoint
                     let author_thumbnail = if !author_thumbnail_raw.is_empty() {
                         format!("{}/channel_icon/{}", base_url, urlencoding::encode(author_thumbnail_raw))
                     } else {
@@ -608,12 +555,10 @@ fn extract_comments(data: &serde_json::Value, base_url: &str) -> Vec<Comment> {
                     });
                 }
             }
-            // More efficient iteration over values
             for value in obj_map.values() {
                 walk(value, comments, base_url);
             }
         } else if let Some(arr) = obj.as_array() {
-            // More efficient iteration over array
             for item in arr {
                 walk(item, comments, base_url);
             }
@@ -628,6 +573,7 @@ lazy_static! {
     static ref THUMBNAIL_CACHE: Arc<Mutex<LruCache<String, (Vec<u8>, String, u64)>>> = Arc::new(
         Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1000).unwrap()))
     );
+    static ref DIRECT_URL_CLEANUP_STARTED: AtomicBool = AtomicBool::new(false);
 }
 
 const CACHE_DURATION: u64 = 3600;
@@ -649,7 +595,6 @@ fn sanitize_text(input: &str) -> String {
         .to_string();
     let decoded = decode_html_entities(&decoded).to_string();
     
-    // More efficient sanitization without creating intermediate vectors
     let mut result = String::new();
     let mut prev_was_space = false;
     
@@ -722,8 +667,6 @@ fn collect_cookie_paths() -> Vec<PathBuf> {
     paths
 }
 
-/// Parses quality string into resolution height (e.g. "720", "720p", "hd720" -> Some(720)).
-/// Used to decide when to use separate video+audio streams and ffmpeg merge.
 fn parse_quality_height(quality: &str) -> Option<u32> {
     let s = quality.trim().to_lowercase();
     let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
@@ -754,7 +697,6 @@ fn parse_quality_height(quality: &str) -> Option<u32> {
     aliases.get(s.as_str()).copied()
 }
 
-/// Returns (video_url, audio_url) for given resolution, using separate streams and cookies like ytapilegacy.
 async fn resolve_video_audio_urls(
     video_id: &str,
     height: u32,
@@ -831,7 +773,6 @@ async fn resolve_video_audio_urls(
                         }
                     }
                 }
-                // best video by tbr при точном разрешении; иначе лучший с height <= запрошенного
                 let video_format_id = video_candidates
                     .into_iter()
                     .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
@@ -891,7 +832,6 @@ async fn resolve_video_audio_urls(
     Err("Could not get separate video and audio URLs for any cookie attempt".to_string())
 }
 
-/// Объединяет видео и аудио потоки в MP4 в реальном времени через ffmpeg и отдаёт в ответ.
 fn stream_ffmpeg_merged_response(video_url: &str, audio_url: &str) -> HttpResponse {
     const CHUNK: usize = 65536;
     let video_url = video_url.to_string();
@@ -900,7 +840,6 @@ fn stream_ffmpeg_merged_response(video_url: &str, audio_url: &str) -> HttpRespon
     let user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0 Safari/537.36";
     let headers_arg = "Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com";
     std::thread::spawn(move || {
-        // Конвертация в MP4 в реальном времени: два входа -> один выход -f mp4 (fragmented для стриминга)
         let mut child = match Command::new("ffmpeg")
             .args([
                 "-hide_banner",
@@ -938,7 +877,7 @@ fn stream_ffmpeg_merged_response(video_url: &str, audio_url: &str) -> HttpRespon
                 "-b:a",
                 "160k",
                 "-movflags",
-                "frag_keyframe+empty_moov+default_base_moof",
+                "frag_keyframe+empty_moov",
                 "-f",
                 "mp4",
                 "-",
@@ -1003,15 +942,16 @@ fn stream_ffmpeg_merged_response(video_url: &str, audio_url: &str) -> HttpRespon
     let stream = ReceiverStream::new(rx).map(|r| r.map(web::Bytes::from).map_err(actix_web::error::ErrorInternalServerError));
     HttpResponse::Ok()
         .insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")))
+        .insert_header(("Accept-Ranges", "bytes"))
         .streaming(stream)
 }
 
-/// Converts video to specified codec - writes to temp file, then streams
 fn stream_converted_video(
     source_url: &str,
     user_agent: &str,
     _video_id: &str,
     codec: &str,
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> HttpResponse {
     let source_url = source_url.to_string();
     let ua = user_agent.to_string();
@@ -1019,7 +959,7 @@ fn stream_converted_video(
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
 
     std::thread::spawn(move || {
-        // Create a unique temporary file path
+        let _permit = _permit; // moved into thread; dropped when thread exits
         let temp_dir = env::temp_dir();
         let temp_file_name = format!(
             "yt_api_video_{}_{}.{}",
@@ -1032,7 +972,6 @@ fn stream_converted_video(
         );
         let temp_file_path = temp_dir.join(temp_file_name);
 
-        // Build FFmpeg command - HTTP input with headers, file output
         let mut cmd = Command::new("ffmpeg");
         cmd.args([
             "-hide_banner", "-loglevel", "error", "-nostdin",
@@ -1041,7 +980,7 @@ fn stream_converted_video(
             "-reconnect_at_eof", "1",
             "-reconnect_delay_max", "10",
             "-user_agent", &ua,
-            "-headers", "Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com\r\n",
+            "-headers", "Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com",
             "-i", &source_url,
         ]);
 
@@ -1059,14 +998,12 @@ fn stream_converted_video(
             ]);
         }
 
-        // Output to temporary file
         let temp_path_str = temp_file_path.to_string_lossy().to_string();
         cmd.arg(&temp_path_str);
 
         cmd.stdin(Stdio::null())
             .stderr(Stdio::piped());
 
-        // Run FFmpeg and wait for completion
         let output = match cmd.output() {
             Ok(o) => o,
             Err(e) => {
@@ -1074,7 +1011,6 @@ fn stream_converted_video(
                     std::io::ErrorKind::Other,
                     format!("FFmpeg failed to start: {}", e)
                 )));
-                // Clean up temp file if it exists
                 let _ = fs::remove_file(&temp_file_path);
                 return;
             }
@@ -1091,7 +1027,6 @@ fn stream_converted_video(
             return;
         }
 
-        // Read the temp file and stream its contents
         match fs::File::open(&temp_file_path) {
             Ok(mut file) => {
                 let mut buffer = [0u8; 65536];
@@ -1115,7 +1050,6 @@ fn stream_converted_video(
             }
         }
 
-        // Clean up temp file after streaming
         let _ = fs::remove_file(&temp_file_path);
     });
 
@@ -1125,6 +1059,69 @@ fn stream_converted_video(
         .insert_header((CONTENT_TYPE, HeaderValue::from_str(mime_type).unwrap()))
         .insert_header(("Cache-Control", "public, max-age=3600"))
         .streaming(stream)
+}
+
+/// Removes old temp files created by direct_url: `yt_api_video_*` in temp_dir (older than 1h),
+/// and files in `yt_api_hls_cache` older than 24h.
+fn clean_direct_url_temp_files() {
+    let temp_dir = env::temp_dir();
+    let now = SystemTime::now();
+    let max_age_video = Duration::from_secs(3600);   // 1 hour for codec conversion temp files
+    let max_age_hls = Duration::from_secs(86400);   // 24 hours for HLS cache
+
+    if let Ok(entries) = fs::read_dir(&temp_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with("yt_api_video_") && (name.ends_with(".mp4") || name.ends_with(".3gp")) {
+                        if let Ok(meta) = fs::metadata(&path) {
+                            if let Ok(mtime) = meta.modified() {
+                                if now.duration_since(mtime).unwrap_or(Duration::MAX) > max_age_video {
+                                    let _ = fs::remove_file(&path);
+                                    log::debug!("direct_url cleanup: removed old temp {}", path.display());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let hls_cache = temp_dir.join("yt_api_hls_cache");
+    if hls_cache.is_dir() {
+        if let Ok(entries) = fs::read_dir(&hls_cache) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Ok(meta) = fs::metadata(&path) {
+                    if let Ok(mtime) = meta.modified() {
+                        if now.duration_since(mtime).unwrap_or(Duration::MAX) > max_age_hls {
+                            let _ = fs::remove_file(&path);
+                            log::debug!("direct_url cleanup: removed old hls cache {}", path.display());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn direct_url_cleanup_loop() {
+    let interval = Duration::from_secs(900); // 15 minutes
+    loop {
+        tokio::time::sleep(interval).await;
+        let _ = task::spawn_blocking(clean_direct_url_temp_files).await;
+    }
+}
+
+fn spawn_direct_url_cleanup_if_needed() {
+    if DIRECT_URL_CLEANUP_STARTED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        actix_web::rt::spawn(direct_url_cleanup_loop());
+    }
 }
 
 async fn resolve_direct_stream_url(
@@ -1487,7 +1484,6 @@ pub async fn channel_icon(
     let input = path.into_inner();
     let config = &data.config;
 
-    // 1. Если это уже прямая ссылка на картинку — просто проксируем
     let decoded = urlencoding::decode(&input)
         .unwrap_or_else(|_| std::borrow::Cow::Owned(input.clone()))
         .to_string();
@@ -1524,20 +1520,17 @@ pub async fn channel_icon(
     if input.len() == 24 && input.starts_with("UC") {
         channel_id = input.clone();
     } else if input.starts_with('@') {
-        // Получаем channelId из страницы канала
         let handle = &input[1..];
         let page_url = format!("https://www.youtube.com/@{}", handle);
 
         if let Ok(resp) = client.get(&page_url).send().await {
             if let Ok(html) = resp.text().await {
-                // Ищем в HTML: "channelId":"UCxxxxxxxxxxxxxxxxxxxxxx"
                 if let Some(start) = html.find(r#""channelId":"UC"#) {
                     let slice = &html[start + 13..]; // после "channelId":"
                     if let Some(end) = slice.find('"') {
                         channel_id = slice[..end].to_string();
                     }
                 }
-                // Альтернатива: ищем link rel="canonical" href="https://www.youtube.com/channel/UC...
                 if channel_id.is_empty() {
                     if let Some(pos) = html.find(r#"<link rel="canonical" href="https://www.youtube.com/channel/"#) {
                         let slice = &html[pos + 47..]; // длина префикса
@@ -1549,7 +1542,6 @@ pub async fn channel_icon(
             }
         }
     } else {
-        // предполагаем video id → player endpoint
         channel_id = get_channel_id_from_video(&client, &input, &innertube_key, &ctx).await;
     }
 
@@ -1558,7 +1550,6 @@ pub async fn channel_icon(
             .json(serde_json::json!({"error": "Cannot determine channel ID"}));
     }
 
-    // 3. Теперь получаем аватарку канала по channelId через /browse
     let avatar_url = get_channel_avatar_url(&client, &channel_id, &innertube_key, &ctx).await;
 
     if avatar_url.is_empty() {
@@ -1566,7 +1557,6 @@ pub async fn channel_icon(
             .json(serde_json::json!({"error": "Channel avatar not found"}));
     }
 
-    // 4. Проксируем найденную картинку
     proxy_image(&avatar_url).await
 }
 
@@ -1619,7 +1609,6 @@ pub async fn get_ytvideo_info(
         .unwrap_or("true".to_string());
     let _use_video_proxy = proxy_param != "false";
 
-    // Use InnerTube API key from config
     let innertube_key = match config.get_innertube_key() {
         Some(key) => key,
         None => {
@@ -1631,7 +1620,6 @@ pub async fn get_ytvideo_info(
 
     let client = Client::new();
     
-    // Fetch initial player response (like in youtube_fetch.py)
     let video_url = format!("https://www.youtube.com/watch?v={}", video_id);
     
     let html = match client.get(&video_url).send().await {
@@ -1652,7 +1640,6 @@ pub async fn get_ytvideo_info(
         }
     };
     
-    // Extract ytcfg from HTML
     let cfg = extract_ytcfg(&html);
     let pr = extract_initial_player_response(&html);
     let api_key = cfg.get("INNERTUBE_API_KEY").and_then(|v| v.as_str()).unwrap_or(innertube_key);
@@ -1665,13 +1652,11 @@ pub async fn get_ytvideo_info(
         })
     });
     
-    // Ensure region and language settings are applied
     if let Some(client) = ctx.get_mut("client").and_then(|c| c.as_object_mut()) {
         client.insert("gl".to_string(), serde_json::Value::String("US".to_string())); // Set region to USA
         client.insert("hl".to_string(), serde_json::Value::String("en-US".to_string())); // Set language to English (USA)
     }
     
-    // Call InnerTube next endpoint to get additional data
     let next_payload = serde_json::json!({
         "context": ctx,
         "videoId": video_id
@@ -1699,7 +1684,6 @@ pub async fn get_ytvideo_info(
         }
     };
     
-    // Get comments token and fetch comments like in python script
     let comments_token = get_comments_token(&next_data);
     let mut cont_resp = serde_json::Value::Null;
     
@@ -1730,28 +1714,23 @@ pub async fn get_ytvideo_info(
         };
     }
     
-    // Extract video details - do this once and cache results
     let vd = pr.get("videoDetails").unwrap_or(&serde_json::Value::Null);
     let micro = pr
         .get("microformat")
         .and_then(|m| m.get("playerMicroformatRenderer"))
         .unwrap_or(&serde_json::Value::Null);
     
-    // Extract comments first as this may be slow, do it in parallel conceptually
     let comments = if !cont_resp.is_null() {
         extract_comments(&cont_resp, base_trimmed)
     } else {
         extract_comments(&next_data, base_trimmed)
     };
     
-    // Extract likes count using improved function
     let likes = find_likes(&next_data);
     
-    // Extract other metrics
     let comm_cnt = find_comments_count(&pr, &next_data);
     let subscriber_count = find_subscriber_count(&next_data);
     
-    // Efficiently extract all data in one pass through the JSON
     let mut title = String::new();
     let mut author = String::new();
     let mut description = String::new();
@@ -1761,59 +1740,47 @@ pub async fn get_ytvideo_info(
     let mut channel_thumbnail = String::new();
     let _duration = String::new();
     
-    // Direct extraction from primary sources with minimal chaining
     if let Some(contents) = next_data.get("contents") {
         if let Some(two_col) = contents.get("twoColumnWatchNextResults") {
             if let Some(results) = two_col.get("results") {
                 if let Some(results_inner) = results.get("results") {
                     if let Some(contents_array) = results_inner.get("contents").and_then(|c| c.as_array()) {
                         if contents_array.len() > 1 {
-                            // Process primary info (index 0)
                             if let Some(primary_info) = contents_array[0].get("videoPrimaryInfoRenderer") {
-                                // Extract title efficiently
                                 if let Some(title_val) = primary_info.get("title") {
                                     title = simplify_text(title_val);
                                 }
                                 
-                                // Extract published date efficiently
                                 if let Some(date_text) = primary_info.get("dateText") {
                                     published_at = simplify_text(date_text);
                                 }
                                 
-                                // Extract view count efficiently
                                 if let Some(view_count) = primary_info.get("viewCount") {
                                     if let Some(video_view_count) = view_count.get("videoViewCountRenderer") {
                                         if let Some(view_count_simple) = video_view_count.get("viewCount") {
                                             views = simplify_text(view_count_simple);
-                                            // Extract only digits from views more efficiently
                                             views.retain(|c| c.is_ascii_digit());
                                         }
                                     }
                                 }
                             }
                             
-                            // Process secondary info (index 1)
                             if let Some(secondary_info) = contents_array[1].get("videoSecondaryInfoRenderer") {
-                                // Extract description
                                 if let Some(attr_desc) = secondary_info.get("attributedDescription") {
                                     description = attr_desc.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
                                 }
                                 
-                                // Extract owner info
                                 if let Some(owner) = secondary_info.get("owner").and_then(|o| o.get("videoOwnerRenderer")) {
-                                    // Extract author name
                                     if let Some(title_val) = owner.get("title") {
                                         author = simplify_text(title_val);
                                     }
                                     
-                                    // Extract channel ID
                                     if let Some(nav_endpoint) = owner.get("navigationEndpoint") {
                                         if let Some(browse_endpoint) = nav_endpoint.get("browseEndpoint") {
                                             channel_id = browse_endpoint.get("browseId").and_then(|b| b.as_str()).unwrap_or("").to_string();
                                         }
                                     }
                                     
-                                    // Extract channel thumbnail
                                     if let Some(thumbnails) = owner.get("thumbnail").and_then(|t| t.get("thumbnails")).and_then(|arr| arr.as_array()) {
                                         if !thumbnails.is_empty() {
                                             channel_thumbnail = thumbnails[0].get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
@@ -1828,7 +1795,6 @@ pub async fn get_ytvideo_info(
         }
     }
     
-    // Fallback to original extraction if data not found, using cached values
     if title.is_empty() {
         title = vd.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
     }
@@ -1858,7 +1824,6 @@ pub async fn get_ytvideo_info(
         channel_id = vd.get("channelId").and_then(|c| c.as_str()).unwrap_or("").to_string();
     }
     
-    // Extract duration more efficiently
     let duration = if let Some(length_seconds) = vd.get("lengthSeconds").and_then(|l| l.as_str()) {
         if let Ok(seconds) = length_seconds.parse::<u64>() {
             format!("PT{}M{}S", seconds / 60, seconds % 60)
@@ -1869,7 +1834,6 @@ pub async fn get_ytvideo_info(
         String::new()
     };
     
-    // Build final video URL
     let final_video_url = if config.video.source == "direct" {
         format!(
             "{}/direct_url?video_id={}",
@@ -1899,7 +1863,6 @@ pub async fn get_ytvideo_info(
             .get("ownerProfileUrl")
             .and_then(|url| url.as_str())
             .and_then(|url_str| {
-                // Extract the @username part from URLs like "http://www.youtube.com/@TheAnimeSelect"
                 url_str.rsplit('/').next().map(|part| part.to_string())
             }),
         embed_url: format!("https://www.youtube.com/embed/{}", video_id),
@@ -1914,10 +1877,8 @@ pub async fn get_ytvideo_info(
         },
         comments,
         channel_thumbnail: if !channel_thumbnail.is_empty() {
-            // If we have a direct thumbnail URL from the API, use it
             format!("{}/channel_icon/{}", base_trimmed, urlencoding::encode(&channel_thumbnail))
         } else if !channel_id.is_empty() {
-            // Otherwise use the channel ID
             format!("{}/channel_icon/{}", base_trimmed, channel_id)
         } else {
             "".to_string()
@@ -1995,7 +1956,6 @@ pub async fn get_related_videos(
 
     let client = Client::new();
     
-    // Use InnerTube API key from config
     let innertube_key = match config.get_innertube_key() {
         Some(key) => key,
         None => {
@@ -2012,7 +1972,6 @@ pub async fn get_related_videos(
         }
     });
 
-    // Fetch initial HTML to get ytcfg
     let watch_url = format!("https://www.youtube.com/watch?v={}", video_id);
     let headers_map = {
         let mut map = reqwest::header::HeaderMap::new();
@@ -2042,7 +2001,6 @@ pub async fn get_related_videos(
     let api_key_from_cfg = ytcfg.get("INNERTUBE_API_KEY").and_then(|v| v.as_str()).unwrap_or(innertube_key);
     let context_from_cfg = ytcfg.get("INNERTUBE_CONTEXT").cloned().unwrap_or(context);
 
-    // Make first InnerTube request
     let next_url = format!("https://www.youtube.com/youtubei/v1/next?key={}", api_key_from_cfg);
     let body = serde_json::json!({
         "context": context_from_cfg,
@@ -2074,11 +2032,9 @@ pub async fn get_related_videos(
         }
     };
 
-    // Extract initial related videos
     let mut related_videos = extract_related_videos_from_response(&next_response);
     let mut continuation = get_related_continuation(&next_response);
     
-    // Load more videos through continuation if needed
     let mut page = 1;
     while let Some(cont_token) = continuation {
         if related_videos.len() >= desired_count as usize || page >= 6 {
@@ -2117,7 +2073,6 @@ pub async fn get_related_videos(
         continuation = get_related_continuation(&cont_response);
     }
 
-    // Remove duplicates
     let mut seen = std::collections::HashSet::new();
     let unique_videos: Vec<_> = related_videos
         .into_iter()
@@ -2131,7 +2086,6 @@ pub async fn get_related_videos(
         })
         .collect();
 
-    // Apply pagination
     let start_index = offset as usize;
     let end_index = (offset + limit) as usize;
     let paginated_videos = if start_index < unique_videos.len() {
@@ -2141,7 +2095,6 @@ pub async fn get_related_videos(
         &[][..]
     };
 
-    // Convert to our format
     let mut result_videos: Vec<RelatedVideo> = Vec::new();
     for video in paginated_videos {
         let thumbnail = format!("{}/thumbnail/{}", base_trimmed, video.video_id);
@@ -2233,6 +2186,8 @@ pub async fn get_direct_video_url(
     )
 )]
 pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> impl Responder {
+    spawn_direct_url_cleanup_if_needed();
+
     let mut query_params: HashMap<String, String> = HashMap::new();
     for pair in req.query_string().split('&') {
         let mut parts = pair.split('=');
@@ -2250,12 +2205,9 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
         }
     };
 
-    // Check for codec parameter for conversion
     let codec = query_params.get("codec").map(|c| c.as_str());
 
-    // If codec is specified, perform conversion
 	if let Some(codec_str) = codec {
-		// Validate codec
 		if codec_str != "mpeg4" && codec_str != "h263" {
 			return HttpResponse::BadRequest().json(serde_json::json!({
 				"error": "Unsupported codec",
@@ -2264,7 +2216,6 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
 			}));
 		}
 
-		// Get direct video URL for conversion - always use 360 quality for conversion
 		let direct_url = match resolve_direct_stream_url(&video_id, Some("360"), false, &data.config).await {
 			Ok(url) => url,
 			Err(e) => {
@@ -2275,16 +2226,14 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
 			}
 		};
 
-		// Convert and stream
 		let user_agent = data.config.get_innertube_user_agent();
-		return stream_converted_video(&direct_url, &user_agent, &video_id, codec_str);
+		let permit = data.codec_semaphore.clone().acquire_owned().await.ok();
+		return stream_converted_video(&direct_url, &user_agent, &video_id, codec_str, permit);
 	}
 
-    // Check if we should return HLS manifest URL instead of direct stream URL
     let hls_only = query_params.get("hls").map(|v| v == "true").unwrap_or(false);
 
     if hls_only {
-        // Return HLS manifest URL without quality selection, similar to Python script
         match get_hls_manifest_url(&video_id, &data.config).await {
             Ok(manifest_url) => {
                 HttpResponse::Ok().json(serde_json::json!({
@@ -2311,34 +2260,62 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
         let use_quality_hls = quality.and_then(|q| parse_quality_height(q)).is_some();
         if use_quality_hls {
             let height = quality.and_then(|q| parse_quality_height(q)).unwrap();
-            match get_hls_manifest_url(&video_id, &data.config).await {
-                Ok(master_url) => {
-                    let ua = data.config.get_innertube_user_agent();
-                    match fetch_hls_master_body(&master_url, &ua).await {
-                        Ok(master_body) => {
+            match fetch_player_response(&video_id, &data.config).await {
+                Ok(player_data) => {
+                    if let Ok((master_url, duration_seconds)) =
+                        get_hls_manifest_url_and_duration_from_player(&player_data)
+                    {
+                        let ua = data.config.get_innertube_user_agent();
+                        if let Ok(master_body) = fetch_hls_master_body(&master_url, &ua).await {
                             let audio_groups = parse_hls_audio_groups(&master_body, &master_url);
-                            let variants = parse_hls_master_variants(&master_body, &master_url, &audio_groups);
-                            if let Some((video_url, audio_url)) = pick_hls_variant_for_height(&variants, height) {
-                                if req.method() == actix_web::http::Method::HEAD {
-                                    return HttpResponse::Ok()
-                                        .insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")))
-                                        .finish();
+                            let variants =
+                                parse_hls_master_variants(&master_body, &master_url, &audio_groups);
+                            if let Some((video_url, audio_url)) =
+                                pick_hls_variant_for_height(&variants, height)
+                            {
+                                let cache_path = hls_merge_cache_path(&video_id, height);
+                                if !cache_path.exists() {
+                                    let v_url = video_url.clone();
+                                    let a_url = audio_url.clone();
+                                    let c_path = cache_path.clone();
+                                    let ua = data.config.get_innertube_user_agent().to_string();
+                                    match task::spawn_blocking(move || {
+                                        run_ffmpeg_hls_to_file(v_url, a_url, c_path, ua)
+                                    })
+                                    .await
+                                    {
+                                        Ok(Ok(())) => {}
+                                        Ok(Err(e)) => {
+                                            return HttpResponse::InternalServerError().json(
+                                                serde_json::json!({
+                                                    "error": "FFmpeg HLS merge failed",
+                                                    "details": e
+                                                }),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            return HttpResponse::InternalServerError().json(
+                                                serde_json::json!({
+                                                    "error": "Task join error",
+                                                    "details": e.to_string()
+                                                }),
+                                            );
+                                        }
+                                    }
                                 }
-                                return stream_hls_to_mp4_response(
-                                    &video_url,
-                                    audio_url.as_deref(),
-                                    &data.config.get_innertube_user_agent(),
+                                return serve_mp4_from_cache(
+                                    &cache_path,
+                                    &req,
+                                    duration_seconds,
                                 );
                             }
                         }
-                        Err(_) => {}
                     }
                 }
                 Err(_) => {}
             }
         }
 
-        // Без параметра quality — прямая ссылка из player API (без yt-dlp); иначе yt-dlp
         let direct_url = if quality.is_none() {
             fetch_player_response(&video_id, &data.config)
                 .await
@@ -2611,10 +2588,8 @@ pub async fn download_video(req: HttpRequest, data: web::Data<crate::AppState>) 
     }
 }
 
-// Helper functions for InnerTube related videos
 
 fn get_related_continuation(data: &serde_json::Value) -> Option<String> {
-    // Try to find continuation token in the response
     if let Some(contents) = data.get("contents")
         .and_then(|c| c.get("twoColumnWatchNextResults"))
         .and_then(|c| c.get("secondaryResults"))
@@ -2658,7 +2633,6 @@ struct RelatedVideoInfo {
 fn extract_related_videos_from_response(data: &serde_json::Value) -> Vec<RelatedVideoInfo> {
     let mut videos = Vec::new();
     
-    // Walk through the JSON structure to find lockupViewModel entries
     walk_json_for_videos(data, &mut videos);
     
     videos
@@ -2667,14 +2641,12 @@ fn extract_related_videos_from_response(data: &serde_json::Value) -> Vec<Related
 fn walk_json_for_videos(obj: &serde_json::Value, videos: &mut Vec<RelatedVideoInfo>) {
     match obj {
         serde_json::Value::Object(map) => {
-            // Check if this is a lockupViewModel
             if let Some(lockup_view_model) = map.get("lockupViewModel") {
                 if let Some(video_info) = extract_video_from_lockup(lockup_view_model) {
                     videos.push(video_info);
                 }
             }
             
-            // Continue walking through all values
             for (_, value) in map {
                 walk_json_for_videos(value, videos);
             }
@@ -2705,7 +2677,6 @@ fn extract_video_from_lockup(lockup: &serde_json::Value) -> Option<RelatedVideoI
         .as_str()?
         .to_string();
     
-    // Extract metadata rows
     let metadata_rows = metadata
         .get("lockupMetadataViewModel")?
         .as_object()?
@@ -2722,7 +2693,6 @@ fn extract_video_from_lockup(lockup: &serde_json::Value) -> Option<RelatedVideoI
     let mut published = "—".to_string();
     
     if !metadata_rows.is_empty() {
-        // First row typically contains channel name
         if let Some(first_row) = metadata_rows.first() {
             if let Some(metadata_parts) = first_row.as_object()
                 .and_then(|r| r.get("metadataParts"))
@@ -2741,14 +2711,12 @@ fn extract_video_from_lockup(lockup: &serde_json::Value) -> Option<RelatedVideoI
             }
         }
         
-        // Second row typically contains views and published time
         if metadata_rows.len() > 1 {
             if let Some(second_row) = metadata_rows.get(1) {
                 if let Some(metadata_parts) = second_row.as_object()
                     .and_then(|r| r.get("metadataParts"))
                     .and_then(|p| p.as_array())
                 {
-                    // Views (first part)
                     if metadata_parts.len() >= 1 {
                         if let Some(views_raw) = metadata_parts[0].as_object()
                             .and_then(|p| p.get("text"))
@@ -2760,7 +2728,6 @@ fn extract_video_from_lockup(lockup: &serde_json::Value) -> Option<RelatedVideoI
                         }
                     }
                     
-                    // Published time (second part)
                     if metadata_parts.len() >= 2 {
                         if let Some(published_raw) = metadata_parts[1].as_object()
                             .and_then(|p| p.get("text"))
@@ -2776,7 +2743,6 @@ fn extract_video_from_lockup(lockup: &serde_json::Value) -> Option<RelatedVideoI
         }
     }
     
-    // Extract duration from thumbnail overlays
     let mut duration = "—".to_string();
     if let Some(content_image) = lockup.get("contentImage").and_then(|ci| ci.as_object()) {
         if let Some(thumbnail_vm) = content_image.get("thumbnailViewModel").and_then(|tvm| tvm.as_object()) {
@@ -2805,7 +2771,6 @@ fn extract_video_from_lockup(lockup: &serde_json::Value) -> Option<RelatedVideoI
         }
     }
     
-    // We don't extract direct thumbnail URLs, instead we generate local ones in the main function
     let thumbnail = String::new();
     
     Some(RelatedVideoInfo {
@@ -2819,17 +2784,14 @@ fn extract_video_from_lockup(lockup: &serde_json::Value) -> Option<RelatedVideoI
     })
 }
 
-// ────────────────────────────────────────────────
-// Вспомогательные функции
-// ────────────────────────────────────────────────
 
-const HLS_PLAYER_API_KEY_FALLBACK: &str = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
-
-/// Общий запрос к youtubei/v1/player (api key и user-agent из config).
 async fn fetch_player_response(
     video_id: &str,
     config: &crate::config::Config,
 ) -> Result<Value, String> {
+    let api_key = config
+        .get_innertube_key()
+        .ok_or("innertube api key не задан в config.yml (api.innertube.key)")?;
     let client = Client::new();
     let user_agent = config.get_innertube_user_agent();
     let player_client = config.get_innertube_player_client();
@@ -2839,33 +2801,28 @@ async fn fetch_player_response(
         },
         "videoId": video_id
     });
-    let keys: Vec<&str> = match config.get_innertube_key() {
-        Some(k) => vec![k, HLS_PLAYER_API_KEY_FALLBACK],
-        None => vec![HLS_PLAYER_API_KEY_FALLBACK],
-    };
-    for api_key in keys {
-        let url = format!("https://www.youtube.com/youtubei/v1/player?key={}", api_key);
-        let resp = client
-            .post(&url)
-            .header("User-Agent", &user_agent)
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .header("Content-Type", "application/json")
-            .json(&json_data)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            continue;
-        }
-        let data = resp.json::<Value>().await.map_err(|e| e.to_string())?;
-        return Ok(data);
+    let url = format!("https://www.youtube.com/youtubei/v1/player?key={}", api_key);
+    let resp = client
+        .post(&url)
+        .header("User-Agent", &user_agent)
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .header("Content-Type", "application/json")
+        .json(&json_data)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("player API HTTP {}", resp.status()));
     }
-    Err("player API failed for all keys".to_string())
+    resp.json::<Value>().await.map_err(|e| e.to_string())
 }
 
-/// Получает HLS Master Manifest URL из ответа player (streamingData.hlsManifestUrl).
 async fn get_hls_manifest_url(video_id: &str, config: &crate::config::Config) -> Result<String, String> {
     let data = fetch_player_response(video_id, config).await?;
+    get_hls_manifest_url_from_player(&data)
+}
+
+fn get_hls_manifest_url_and_duration_from_player(data: &Value) -> Result<(String, Option<u64>), String> {
     let streaming_data = data
         .get("streamingData")
         .ok_or("streamingData отсутствует")?;
@@ -2873,10 +2830,37 @@ async fn get_hls_manifest_url(video_id: &str, config: &crate::config::Config) ->
         .get("hlsManifestUrl")
         .and_then(|v| v.as_str())
         .ok_or("hlsManifestUrl отсутствует (приватное/возраст/регион)")?;
-    Ok(hls.to_string())
+
+    let duration_seconds = streaming_data
+        .get("formats")
+        .and_then(|a| a.get(0))
+        .and_then(|f| f.get("approxDurationMs"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|ms| (ms + 999) / 1000)
+        .or_else(|| {
+            streaming_data
+                .get("adaptiveFormats")
+                .and_then(|a| a.get(0))
+                .and_then(|f| f.get("approxDurationMs"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| (ms + 999) / 1000)
+        })
+        .or_else(|| {
+            data.get("videoDetails")
+                .and_then(|vd| vd.get("lengthSeconds"))
+                .and_then(|l| l.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+        });
+
+    Ok((hls.to_string(), duration_seconds))
 }
 
-/// Прямая ссылка на стрим из player API (streamingData.formats или adaptiveFormats с полем url). Без yt-dlp.
+fn get_hls_manifest_url_from_player(data: &Value) -> Result<String, String> {
+    get_hls_manifest_url_and_duration_from_player(data).map(|(url, _)| url)
+}
+
 fn get_direct_stream_url_from_player_response(data: &Value) -> Option<String> {
     let streaming = data.get("streamingData")?;
     let mut best: Option<(u32, &str)> = None;
@@ -2901,7 +2885,6 @@ fn get_direct_stream_url_from_player_response(data: &Value) -> Option<String> {
     best.map(|(_, u)| u.to_string())
 }
 
-/// Скачивает тело master manifest по URL (User-Agent из config).
 async fn fetch_hls_master_body(master_url: &str, user_agent: &str) -> Result<String, String> {
     let client = Client::builder()
         .user_agent(user_agent)
@@ -2919,7 +2902,6 @@ async fn fetch_hls_master_body(master_url: &str, user_agent: &str) -> Result<Str
     resp.text().await.map_err(|e| e.to_string())
 }
 
-/// Аудио-группа из master: GROUP-ID -> полный URL плейлиста (из одного запроса мастера).
 fn parse_hls_audio_groups(master_body: &str, master_base_url: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
     let re_group = regex::Regex::new(r#"GROUP-ID="([^"]+)""#).unwrap();
@@ -2944,7 +2926,6 @@ fn parse_hls_audio_groups(master_body: &str, master_base_url: &str) -> HashMap<S
     map
 }
 
-/// Вариант из master: высота, URL видео-плейлиста, опционально URL аудио-плейлиста (из того же мастера).
 fn parse_hls_master_variants(
     master_body: &str,
     master_base_url: &str,
@@ -2982,7 +2963,172 @@ fn parse_hls_master_variants(
     variants
 }
 
-/// Выбирает вариант по высоте; возвращает (video_url, audio_url или None если уже в одном потоке).
+fn hls_merge_cache_path(video_id: &str, height: u32) -> PathBuf {
+    let dir = env::temp_dir().join("yt_api_hls_cache");
+    let _ = fs::create_dir_all(&dir);
+    dir.join(format!("{}_{}.mp4", video_id, height))
+}
+
+fn run_ffmpeg_hls_to_file(
+    video_url: String,
+    audio_url: Option<String>,
+    cache_path: PathBuf,
+    user_agent: String,
+) -> Result<(), String> {
+    let headers_arg = "Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com";
+    let tmp_path = cache_path.with_extension("tmp");
+    let out_path = tmp_path.to_string_lossy().to_string();
+
+    let mut args: Vec<String> = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-nostdin".into(),
+        "-reconnect".into(),
+        "1".into(),
+        "-reconnect_streamed".into(),
+        "1".into(),
+        "-reconnect_at_eof".into(),
+        "1".into(),
+        "-reconnect_delay_max".into(),
+        "10".into(),
+        "-user_agent".into(),
+        user_agent.clone(),
+        "-headers".into(),
+        headers_arg.to_string(),
+        "-i".into(),
+        video_url.clone(),
+    ];
+    if let Some(ref audio) = audio_url {
+        args.extend([
+            "-user_agent".into(),
+            user_agent,
+            "-headers".into(),
+            headers_arg.to_string(),
+            "-i".into(),
+            audio.clone(),
+        ]);
+    }
+    if audio_url.is_some() {
+        args.extend([
+            "-map".into(),
+            "0:v:0".into(),
+            "-map".into(),
+            "1:a:0".into(),
+            "-c:v".into(),
+            "copy".into(),
+            "-c:a".into(),
+            "aac".into(),
+            "-b:a".into(),
+            "160k".into(),
+        ]);
+    } else {
+        args.extend(["-c".into(), "copy".into()]);
+    }
+    args.extend([
+        "-movflags".into(),
+        "frag_keyframe+empty_moov".into(),
+        "-f".into(),
+        "mp4".into(),
+        out_path,
+    ]);
+
+    let status = Command::new("ffmpeg")
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("ffmpeg spawn: {}", e))?
+        .wait()
+        .map_err(|e| format!("ffmpeg wait: {}", e))?;
+    if !status.success() {
+        return Err(format!("ffmpeg exit: {}", status));
+    }
+    fs::rename(&tmp_path, &cache_path).map_err(|e| format!("rename cache: {}", e))?;
+    Ok(())
+}
+
+fn serve_mp4_from_cache(
+    path: &Path,
+    req: &HttpRequest,
+    duration_seconds: Option<u64>,
+) -> HttpResponse {
+    let file_size = match fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(_) => return HttpResponse::NotFound().finish(),
+    };
+    if req.method() == actix_web::http::Method::HEAD {
+        let mut builder = HttpResponse::Ok();
+        builder
+            .insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")))
+            .insert_header(("Accept-Ranges", "bytes"))
+            .insert_header((CONTENT_LENGTH, file_size.to_string()));
+        if let Some(secs) = duration_seconds {
+            let s = secs.to_string();
+            builder
+                .insert_header(("X-Content-Duration", s.as_str()))
+                .insert_header(("Content-Duration", s.as_str()))
+                .insert_header(("X-Video-Duration", s.as_str()))
+                .insert_header(("X-Duration-Seconds", s.as_str()));
+        }
+        return builder.finish();
+    }
+    let range_header = req.headers().get("Range").and_then(|v| v.to_str().ok());
+    let (start, end, status, content_range) = if let Some(range) = range_header {
+        let mut start = 0u64;
+        let mut end = file_size.saturating_sub(1);
+        if let Some(cap) = regex::Regex::new(r"bytes=(\d+)-(\d*)").ok().and_then(|r| r.captures(range)) {
+            if let Some(s) = cap.get(1).and_then(|m| m.as_str().parse::<u64>().ok()) {
+                start = s.min(file_size.saturating_sub(1));
+            }
+            if let Some(m) = cap.get(2).map(|m| m.as_str()) {
+                if !m.is_empty() {
+                    if let Ok(e) = m.parse::<u64>() {
+                        end = e.min(file_size.saturating_sub(1));
+                    }
+                }
+            }
+        }
+        let content_range_val = format!("bytes {}-{}/{}", start, end, file_size);
+        (start, end, actix_web::http::StatusCode::PARTIAL_CONTENT, Some(content_range_val))
+    } else {
+        (0, file_size.saturating_sub(1), actix_web::http::StatusCode::OK, None)
+    };
+    let start = start;
+    let end = end;
+    let content_range = content_range;
+    let body = match fs::File::open(path) {
+        Ok(mut f) => {
+            let _ = f.seek(std::io::SeekFrom::Start(start));
+            let len = end.saturating_sub(start) + 1;
+            let mut buf = vec![0u8; len as usize];
+            if let Ok(n) = f.read(&mut buf) {
+                buf.truncate(n);
+            }
+            buf
+        }
+        Err(_) => return HttpResponse::InternalServerError().finish(),
+    };
+    let mut builder = HttpResponse::build(status);
+    builder
+        .insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")))
+        .insert_header(("Accept-Ranges", "bytes"))
+        .insert_header((CONTENT_LENGTH, body.len()));
+    if let Some(cr) = content_range {
+        builder.insert_header((CONTENT_RANGE, cr));
+    }
+    if let Some(secs) = duration_seconds {
+        let s = secs.to_string();
+        builder
+            .insert_header(("X-Content-Duration", s.as_str()))
+            .insert_header(("Content-Duration", s.as_str()))
+            .insert_header(("X-Video-Duration", s.as_str()))
+            .insert_header(("X-Duration-Seconds", s.as_str()));
+    }
+    builder.body(body)
+}
+
 fn pick_hls_variant_for_height(
     variants: &[(u32, String, Option<String>)],
     requested_height: u32,
@@ -2997,16 +3143,17 @@ fn pick_hls_variant_for_height(
     Some((chosen.1.clone(), chosen.2.clone()))
 }
 
-/// Стримит HLS в MP4 сразу; кэш во время воспроизведения (Cache-Control).
 fn stream_hls_to_mp4_response(
     video_playlist_url: &str,
     audio_playlist_url: Option<&str>,
     user_agent: &str,
+    duration_seconds: Option<u64>,
+    cache_path: Option<PathBuf>,
 ) -> HttpResponse {
     let video_url = video_playlist_url.to_string();
     let audio_url = audio_playlist_url.map(String::from);
     let user_agent = user_agent.to_string();
-    let headers_arg = "Referer: https://www.youtube.com/\r\nOrigin: https://www.youtube.com";
+    let headers_arg = "Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com";
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     std::thread::spawn(move || {
         let args: Vec<&str> = match &audio_url {
@@ -3016,7 +3163,7 @@ fn stream_hls_to_mp4_response(
                 "-user_agent", &user_agent, "-headers", headers_arg,
                 "-i", &video_url,
                 "-c", "copy",
-                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                "-movflags", "frag_keyframe+empty_moov",
                 "-f", "mp4", "-",
             ],
             Some(audio) => vec![
@@ -3025,9 +3172,8 @@ fn stream_hls_to_mp4_response(
                 "-user_agent", &user_agent, "-headers", headers_arg, "-i", &video_url,
                 "-user_agent", &user_agent, "-headers", headers_arg, "-i", audio,
                 "-map", "0:v:0", "-map", "1:a:0",
-                "-c:v", "copy", "-c:a", "copy",
-                "-bsf:a", "aac_adtstoasc",
-                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+                "-movflags", "frag_keyframe+empty_moov",
                 "-f", "mp4", "-",
             ],
         };
@@ -3069,13 +3215,21 @@ fn stream_hls_to_mp4_response(
             Some(s) => s,
             None => return,
         };
+        let mut cache_file: Option<fs::File> = cache_path.as_ref().and_then(|p| {
+            let tmp = p.with_extension("tmp");
+            fs::File::create(&tmp).ok()
+        });
         const CHUNK: usize = 65536;
         let mut buf = [0u8; CHUNK];
         loop {
             match stdout.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if tx.blocking_send(Ok(Bytes::from(buf[..n].to_vec()))).is_err() {
+                    let chunk = Bytes::from(buf[..n].to_vec());
+                    if let Some(ref mut f) = cache_file {
+                        let _ = f.write_all(&chunk);
+                    }
+                    if tx.blocking_send(Ok(chunk)).is_err() {
                         let _ = child.kill();
                         break;
                     }
@@ -3087,16 +3241,31 @@ fn stream_hls_to_mp4_response(
                 }
             }
         }
+        if let (Some(f), Some(p)) = (cache_file, cache_path) {
+            let _ = f.sync_all();
+            drop(f);
+            let tmp = p.with_extension("tmp");
+            let _ = fs::rename(&tmp, &p);
+        }
     });
     let stream = ReceiverStream::new(rx)
         .map(|r| r.map(web::Bytes::from).map_err(actix_web::error::ErrorInternalServerError));
-    HttpResponse::Ok()
+    let mut builder = HttpResponse::Ok();
+    builder
         .insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")))
-        .insert_header(("Cache-Control", "public, max-age=3600"))
-        .streaming(stream)
+        .insert_header(("Accept-Ranges", "bytes"))
+        .insert_header(("Cache-Control", "public, max-age=3600"));
+    if let Some(secs) = duration_seconds {
+        let s = secs.to_string();
+        builder
+            .insert_header(("X-Content-Duration", s.as_str()))
+            .insert_header(("Content-Duration", s.as_str()))
+            .insert_header(("X-Video-Duration", s.as_str()))
+            .insert_header(("X-Duration-Seconds", s.as_str()));
+    }
+    builder.streaming(stream)
 }
 
-/// Streams FFmpeg conversion output (for codec=mpeg4/h263)
 fn stream_ffmpeg_response(
     rx: tokio::sync::mpsc::Receiver<Result<Bytes, std::io::Error>>,
     mime_type: &str,
@@ -3165,20 +3334,17 @@ async fn get_channel_avatar_url(
     {
         Ok(resp) if resp.status().is_success() => {
             if let Ok(json) = resp.json::<serde_json::Value>().await {
-                // Самый надёжный путь — c4TabbedHeaderRenderer → avatar → thumbnails
                 if let Some(header) = json.pointer("/header/c4TabbedHeaderRenderer") {
                     if let Some(thumbs) = header
                         .pointer("/avatar/thumbnails")
                         .and_then(|arr| arr.as_array())
                     {
-                        // Берём самую большую
                         if let Some(best) = thumbs.iter().max_by_key(|t| {
                             let w = t.pointer("/width").and_then(|w| w.as_u64()).unwrap_or(0);
                             w
                         }) {
                             if let Some(u) = best.pointer("/url").and_then(|u| u.as_str()) {
                                 let mut url = u.to_string();
-                                // Заменяем старый домен на новый (часто встречается)
                                 if url.contains("yt3.ggpht.com") {
                                     url = url.replace("yt3.ggpht.com", "yt3.googleusercontent.com");
                                 }
@@ -3188,7 +3354,6 @@ async fn get_channel_avatar_url(
                     }
                 }
 
-                // Запасной путь — в metadata
                 json.pointer("/metadata/channelMetadataRenderer/avatar/thumbnails")
                     .and_then(|arr| arr.as_array())
                     .and_then(|thumbs| thumbs.last())
@@ -3204,7 +3369,6 @@ async fn get_channel_avatar_url(
 }
 
 async fn proxy_image(url: &str) -> HttpResponse {
-    // Replace s900 with s88 in the URL for channel icons
     let processed_url = url.replace("s900", "s88");
     
     let client = Client::builder()

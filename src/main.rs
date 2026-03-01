@@ -101,9 +101,12 @@ use routes::auth::{AuthConfig, TokenStore};
 )]
 struct ApiDoc;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Serialize)]
 struct AppState {
     config: Config,
+    /// Limits concurrent codec conversions (mpeg4/h263) for /direct_url.
+    #[serde(skip)]
+    codec_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 #[utoipa::path(
@@ -165,7 +168,11 @@ async fn main() -> std::io::Result<()> {
     let port = config.server.port;
     log::info!("Starting YouTube API Legacy server on port {}...", port);
 
-    let app_state = web::Data::new(AppState { config });
+    let codec_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let app_state = web::Data::new(AppState {
+        config,
+        codec_semaphore,
+    });
 
     let openapi = ApiDoc::openapi();
 

@@ -190,17 +190,18 @@ pub async fn page_root(
             let videos_grid = render_video_grid(&videos, &main_url);
             let recommendations_shelf = render_recommendations_shelf(&recommendations, &main_url);
             let history_shelf = render_history_shelf(&history, &main_url);
+            // Logged in: recommendations → watch history → trends at the bottom
             let content = format!(
-                r#"<div class="compact-shelf-content-container">
+                r#"{}
+                    {}
+                    <div class="compact-shelf-content-container">
                       <div class="yt-uix-shelfslider-body">
                         <ul class="yt-uix-shelfslider-list">{}</ul>
                       </div>
-                    </div>
-                    {}
-                    {}"#,
-                videos_grid,
+                    </div>"#,
                 recommendations_shelf,
-                history_shelf
+                history_shelf,
+                videos_grid
             );
             (content, subscriptions_sidebar_loading_placeholder(), String::new())
         }
@@ -264,11 +265,10 @@ fn render_recommendations_shelf(items: &[RecommendationItem], main_url: &str) ->
               </span>
               <span class="video-time">{}</span>
             </a>
-            <a class="lohp-video-link max-line-2 yt-uix-sessionlink spf-link" href="{}" title="{}">{}</a>
           </div>
         </div>
         <div class="lohp-video-metadata">
-          <span class="content-uploader lohp-video-metadata-item spf-link">
+          <a class="lohp-video-link max-line-2 yt-uix-sessionlink spf-link" href="{}" title="{}">{}</a><span class="content-uploader lohp-video-metadata-item spf-link">
             <span class="username-prepend">by</span> <a href="{}" class="g-hovercard yt-uix-sessionlink yt-user-name spf-link">{}</a>
           </span>
         </div>
