@@ -401,6 +401,7 @@ body.guide-closed #guide {
 
 /* Home: large shelf — metadata block at bottom (like yt2014) */
 .lohp-large-shelf-container {
+    width: 408px !important;
     display: flex;
     flex-direction: column;
 }
