@@ -67,6 +67,148 @@ fn extract_initial_player_response(html: &str) -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }
 
+async fn download_mux_to_temp_file(
+    video_id: String,
+    height: u32,
+) -> Result<PathBuf, String> {
+    let temp_dir = env::temp_dir();
+    
+    // 1. Имя файла теперь содержит качество: yt_api_video_ID_1080p.mp4
+    let final_file_name = format!("yt_api_video_{}_{}p.mp4", video_id, height);
+    let final_path = temp_dir.join(&final_file_name);
+    
+    // Лок-файл тоже должен быть уникальным для качества
+    let lock_file_name = format!("yt_api_video_{}_{}p.lock", video_id, height);
+    let lock_path = temp_dir.join(&lock_file_name);
+
+    // Если видео уже скачано
+    if final_path.exists() {
+        log::info!("Video cached ({}p): {}. Serving.", height, final_file_name);
+        return Ok(final_path);
+    }
+
+    // --- Механизм блокировки (Locking) ---
+    let start_time = std::time::Instant::now();
+    loop {
+        if final_path.exists() {
+            log::info!("Parallel download finished. Serving {}p.", height);
+            return Ok(final_path);
+        }
+
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true) // Создаст файл только если его нет
+            .open(&lock_path) 
+        {
+            Ok(_) => {
+                log::info!("Lock acquired for {} ({}p). Starting download.", video_id, height);
+                break; 
+            },
+            Err(_) => {
+                // Проверка на "протухший" лок (старше 5 минут)
+                let is_stale = if let Ok(meta) = fs::metadata(&lock_path) {
+                     if let Ok(modified) = meta.modified() {
+                         SystemTime::now().duration_since(modified).unwrap_or(Duration::ZERO).as_secs() > 300 
+                     } else { false }
+                } else { false };
+
+                if is_stale {
+                    log::warn!("Found stale lock for {}. Removing.", video_id);
+                    let _ = fs::remove_file(&lock_path);
+                    continue; 
+                }
+
+                log::info!("Video {} ({}p) is locked by another process. Waiting...", video_id, height);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+
+                if start_time.elapsed().as_secs() > 300 {
+                    return Err("Timeout waiting for another download process".to_string());
+                }
+            }
+        }
+    }
+
+    // --- Подготовка yt-dlp ---
+    
+    let yt_dlp = yt_dlp_binary();
+    let ffmpeg = ffmpeg_binary();
+    let ffmpeg_path = Path::new(&ffmpeg);
+    let ffmpeg_dir = ffmpeg_path.parent().unwrap_or(Path::new(".")).to_string_lossy().to_string();
+
+    let cookie_paths = collect_cookie_paths();
+    let cookie_arg = if let Some(path) = cookie_paths.first() {
+        Some(path.to_string_lossy().to_string())
+    } else {
+        None
+    };
+
+    // Шаблон имени для yt-dlp (он сам подставит расширение)
+    // Важно: имя шаблона должно совпадать с ожидаемым final_path, но без расширения .mp4,
+    // так как мы форсируем merge в mp4
+    let output_template = temp_dir.join(format!("yt_api_video_{}_{}p.%(ext)s", video_id, height));
+    let output_template_str = output_template.to_string_lossy().to_string();
+
+    let download_result = task::spawn_blocking(move || {
+        let mut cmd = Command::new(&yt_dlp);
+        
+        // --- ВАЖНОЕ ИЗМЕНЕНИЕ ДЛЯ WINDOWS 7 ---
+        // 1. Приоритет: H.264 (avc) + AAC (mp4a) <= нужной высоты
+        // 2. Если нет, то любой MP4 <= нужной высоты
+        // 3. Если нет, то просто best
+        let format_selector = format!(
+            "bestvideo[height<={}][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<={}][ext=mp4]+bestaudio[ext=m4a]/best[height<={}][ext=mp4]/best", 
+            height, height, height
+        );
+
+        cmd.arg("-f").arg(&format_selector);
+        cmd.arg("--merge-output-format").arg("mp4"); // Гарантируем контейнер MP4
+        cmd.arg("-N").arg("4");
+        cmd.arg("--output").arg(&output_template_str);
+        cmd.arg("--ffmpeg-location").arg(&ffmpeg_dir);
+        cmd.arg("--no-playlist");
+        cmd.arg("--force-overwrites");
+        
+        // Опционально: можно добавить --postprocessor-args для ffmpeg, чтобы убедиться в faststart
+        // cmd.arg("--postprocessor-args").arg("Merger+ffmpeg:-movflags +faststart");
+
+        if let Some(c) = cookie_arg {
+            cmd.arg("--cookies").arg(c);
+        }
+
+        cmd.arg(format!("https://www.youtube.com/watch?v={}", video_id));
+
+        log::info!("Starting yt-dlp for {}p...", height);
+        
+        let output = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("Failed to execute yt-dlp: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log::error!("yt-dlp failed.\nSTDERR: {}", stderr);
+            return Err(format!("yt-dlp error: {}", stderr));
+        }
+
+        if final_path.exists() {
+            Ok(final_path)
+        } else {
+            Err("File not found after yt-dlp finished. Probably merged to mkv instead of mp4?".to_string())
+        }
+    }).await;
+
+    // Удаляем лок
+    let _ = fs::remove_file(&lock_path);
+
+    match download_result {
+        Ok(Ok(path)) => Ok(path),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(format!("Task join error: {}", e)),
+    }
+}
+
 fn get_comments_token(data: &serde_json::Value) -> Option<String> {
     if let Some(contents) = data
         .get("contents")
@@ -578,6 +720,61 @@ lazy_static! {
 
 const CACHE_DURATION: u64 = 3600;
 
+fn ffmpeg_binary() -> String {
+    let exe_name = if cfg!(target_os = "windows") { "ffmpeg.exe" } else { "ffmpeg" };
+
+    // 1. Ищем в текущей рабочей папке (откуда запущен cargo run)
+    if let Ok(cwd) = std::env::current_dir() {
+        let direct_path = cwd.join(exe_name);
+        if direct_path.exists() {
+            return direct_path.to_string_lossy().to_string();
+        }
+        let assets_path = cwd.join("assets").join(exe_name);
+        if assets_path.exists() {
+            return assets_path.to_string_lossy().to_string();
+        }
+    }
+
+    // 2. Ищем рядом с самим скомпилированным бинарником (полезно для продакшена)
+    if let Ok(mut exe_dir) = std::env::current_exe() {
+        exe_dir.pop();
+        let direct_path = exe_dir.join(exe_name);
+        if direct_path.exists() {
+            return direct_path.to_string_lossy().to_string();
+        }
+        let assets_path = exe_dir.join("assets").join(exe_name);
+        if assets_path.exists() {
+            return assets_path.to_string_lossy().to_string();
+        }
+    }
+
+    // 3. Fallback: надеемся, что ffmpeg есть в PATH
+    exe_name.to_string()
+}
+
+fn get_duration_from_player_response(data: &serde_json::Value) -> u64 {
+    // Пытаемся достать длительность из videoDetails
+    if let Some(seconds_str) = data.get("videoDetails")
+        .and_then(|vd| vd.get("lengthSeconds"))
+        .and_then(|v| v.as_str()) 
+    {
+        if let Ok(secs) = seconds_str.parse::<u64>() {
+            return secs;
+        }
+    }
+    // Фолбек: из microformat
+    if let Some(seconds_str) = data.get("microformat")
+        .and_then(|m| m.get("playerMicroformatRenderer"))
+        .and_then(|p| p.get("lengthSeconds"))
+        .and_then(|v| v.as_str())
+    {
+         if let Ok(secs) = seconds_str.parse::<u64>() {
+            return secs;
+        }
+    }
+    0 // Если не нашли, считаем видео коротким/потоком
+}
+
 fn yt_dlp_binary() -> String {
     if cfg!(target_os = "windows") {
         if Path::new("assets/yt-dlp.exe").exists() {
@@ -716,120 +913,157 @@ async fn resolve_video_audio_urls(
     }
     attempts.push(None);
 
+    let mut last_error = String::new();
+
     for cookie in attempts {
         let cookie_for_dump = cookie.clone();
         let url = format!("https://www.youtube.com/watch?v={}", video_id);
-        let result = task::spawn_blocking({
-            let yt_dlp = yt_dlp.clone();
-            let url = url.clone();
-            move || {
-                let mut cmd = Command::new(&yt_dlp);
-                cmd.arg("--dump-json").arg(&url);
-                if let Some(ref path) = cookie_for_dump {
-                    cmd.arg("--cookies").arg(path);
-                }
-                let output = cmd.output().ok().filter(|o| o.status.success())?;
-                let info: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-                let formats = info.get("formats")?.as_array()?;
-                let mut video_candidates: Vec<(f64, String)> = Vec::new();
-                let mut video_fallback_candidates: Vec<(u32, f64, String)> = Vec::new();
-                let mut audio_format_id: Option<String> = None;
-                let mut best_audio_tbr = 0f64;
-                let mut best_audio_is_en = false;
-                for f in formats {
-                    let h = f.get("height").and_then(|v| v.as_u64()).map(|u| u as u32);
-                    let vcodec = f.get("vcodec").and_then(|v| v.as_str()).unwrap_or("none");
-                    let acodec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("none");
-                    let protocol = f.get("protocol").and_then(|v| v.as_str()).unwrap_or("");
-                    if !protocol.starts_with("https") {
-                        continue;
-                    }
-                    if vcodec != "none" && acodec == "none" {
-                        if let Some(hi) = h {
-                            if let Some(id) = f.get("format_id").and_then(|v| v.as_str()) {
-                                let tbr = f.get("tbr").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                if hi == height {
-                                    video_candidates.push((tbr, id.to_string()));
-                                } else if hi <= height {
-                                    video_fallback_candidates.push((hi, tbr, id.to_string()));
-                                }
-                            }
-                        }
-                    }
-                    if vcodec == "none" && acodec != "none" {
-                        let format_note = f.get("format").and_then(|v| v.as_str()).unwrap_or("");
-                        let is_en = format_note.contains("[en]");
-                        let tbr = f.get("tbr").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                        let id = f.get("format_id").and_then(|v| v.as_str()).map(String::from);
-                        if let Some(id) = id {
-                            let replace = audio_format_id.is_none()
-                                || is_en && !best_audio_is_en
-                                || (is_en == best_audio_is_en && tbr > best_audio_tbr);
-                            if replace {
-                                audio_format_id = Some(id);
-                                best_audio_tbr = tbr;
-                                best_audio_is_en = is_en;
-                            }
-                        }
-                    }
-                }
-                let video_format_id = video_candidates
-                    .into_iter()
-                    .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
-                    .map(|(_, id)| id)
-                    .or_else(|| {
-                        video_fallback_candidates
-                            .into_iter()
-                            .max_by(|a, b| {
-                                a.0.cmp(&b.0).then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                            })
-                            .map(|(_, _, id)| id)
-                    });
-                let video_fid = video_format_id?;
-                let audio_id = audio_format_id?;
-                Some((video_fid, audio_id))
+        
+        let yt_dlp_clone1 = yt_dlp.clone();
+        let url_clone1 = url.clone();
+        
+        let dump_result = task::spawn_blocking(move || -> Result<(String, String), String> {
+            let mut cmd = Command::new(&yt_dlp_clone1);
+            cmd.arg("--dump-json").arg(&url_clone1);
+            if let Some(ref path) = cookie_for_dump {
+                cmd.arg("--cookies").arg(path);
             }
+            
+            let output = cmd.output().map_err(|e| format!("yt-dlp exec failed: {}", e))?;
+            
+            // ЕСЛИ YTDLP ВЕРНУЛ ОШИБКУ, СОХРАНЯЕМ ЕЁ!
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("yt-dlp --dump-json status: {}, error: {}", output.status, stderr.trim()));
+            }
+            
+            let info: serde_json::Value = serde_json::from_slice(&output.stdout)
+                .map_err(|e| format!("yt-dlp invalid JSON: {}", e))?;
+                
+            let formats = info.get("formats").and_then(|f| f.as_array())
+                .ok_or("No 'formats' array in yt-dlp JSON")?;
+                
+            let mut video_candidates: Vec<(f64, String)> = Vec::new();
+            let mut video_fallback_candidates: Vec<(u32, f64, String)> = Vec::new();
+            let mut audio_format_id: Option<String> = None;
+            let mut best_audio_tbr = 0f64;
+            let mut best_audio_is_en = false;
+            
+            for f in formats {
+                let h = f.get("height").and_then(|v| v.as_u64()).map(|u| u as u32);
+                let vcodec = f.get("vcodec").and_then(|v| v.as_str()).unwrap_or("none");
+                let acodec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("none");
+                let protocol = f.get("protocol").and_then(|v| v.as_str()).unwrap_or("");
+                if !protocol.starts_with("https") {
+                    continue;
+                }
+                if vcodec != "none" && acodec == "none" {
+                    if let Some(hi) = h {
+                        if let Some(id) = f.get("format_id").and_then(|v| v.as_str()) {
+                            let tbr = f.get("tbr").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            if hi == height {
+                                video_candidates.push((tbr, id.to_string()));
+                            } else if hi <= height {
+                                video_fallback_candidates.push((hi, tbr, id.to_string()));
+                            }
+                        }
+                    }
+                }
+                if vcodec == "none" && acodec != "none" {
+                    let format_note = f.get("format").and_then(|v| v.as_str()).unwrap_or("");
+                    let is_en = format_note.contains("[en]");
+                    let tbr = f.get("tbr").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let id = f.get("format_id").and_then(|v| v.as_str()).map(String::from);
+                    if let Some(id) = id {
+                        let replace = audio_format_id.is_none()
+                            || is_en && !best_audio_is_en
+                            || (is_en == best_audio_is_en && tbr > best_audio_tbr);
+                        if replace {
+                            audio_format_id = Some(id);
+                            best_audio_tbr = tbr;
+                            best_audio_is_en = is_en;
+                        }
+                    }
+                }
+            }
+            
+            let video_format_id = video_candidates
+                .into_iter()
+                .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(_, id)| id)
+                .or_else(|| {
+                    video_fallback_candidates
+                        .into_iter()
+                        .max_by(|a, b| {
+                            a.0.cmp(&b.0).then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                        })
+                        .map(|(_, _, id)| id)
+                });
+                
+            let video_fid = video_format_id.ok_or(format!("No video format found for height {}", height))?;
+            let audio_fid = audio_format_id.ok_or("No audio format found")?;
+            Ok((video_fid, audio_fid))
         })
         .await
         .map_err(|e| e.to_string())?;
 
-        let (video_fid, audio_fid) = match result {
-            Some(x) => x,
-            None => continue,
+        let (video_fid, audio_fid) = match dump_result {
+            Ok(x) => x,
+            Err(e) => {
+                log::error!("[YTDLP-DUMP ERROR] cookie attempt failed: {}", e);
+                last_error = e;
+                continue;
+            }
         };
 
         let cookie_for_get_url = cookie.clone();
-        let (video_url, audio_url) = task::spawn_blocking({
-            let yt_dlp = yt_dlp.clone();
-            let url = url.clone();
-            move || {
-                let mut cmd_v = Command::new(&yt_dlp);
-                cmd_v.arg("-f").arg(&video_fid).arg("--get-url").arg(&url);
-                if let Some(ref path) = cookie_for_get_url {
-                    cmd_v.arg("--cookies").arg(path);
-                }
-                let out_v = cmd_v.output().ok().filter(|o| o.status.success())?;
-                let url_v = String::from_utf8_lossy(&out_v.stdout);
-                let url_v = url_v.lines().find(|l| !l.trim().is_empty())?.trim().to_string();
-                let mut cmd_a = Command::new(&yt_dlp);
-                cmd_a.arg("-f").arg(&audio_fid).arg("--get-url").arg(&url);
-                if let Some(ref path) = cookie_for_get_url {
-                    cmd_a.arg("--cookies").arg(path);
-                }
-                let out_a = cmd_a.output().ok().filter(|o| o.status.success())?;
-                let url_a = String::from_utf8_lossy(&out_a.stdout);
-                let url_a = url_a.lines().find(|l| !l.trim().is_empty())?.trim().to_string();
-                Some((url_v, url_a))
+        let yt_dlp_clone2 = yt_dlp.clone();
+        
+        let urls_result = task::spawn_blocking(move || -> Result<(String, String), String> {
+            let mut cmd_v = Command::new(&yt_dlp_clone2);
+            cmd_v.arg("-f").arg(&video_fid).arg("--get-url").arg(&url);
+            if let Some(ref path) = cookie_for_get_url {
+                cmd_v.arg("--cookies").arg(path);
             }
+            let out_v = cmd_v.output().map_err(|e| format!("cmd_v exec failed: {}", e))?;
+            if !out_v.status.success() {
+                let stderr = String::from_utf8_lossy(&out_v.stderr);
+                return Err(format!("yt-dlp video get-url failed: {}", stderr.trim()));
+            }
+            let url_v = String::from_utf8_lossy(&out_v.stdout);
+            let url_v = url_v.lines().find(|l| !l.trim().is_empty())
+                .ok_or("Video URL was empty")?.trim().to_string();
+
+            let mut cmd_a = Command::new(&yt_dlp_clone2);
+            cmd_a.arg("-f").arg(&audio_fid).arg("--get-url").arg(&url);
+            if let Some(ref path) = cookie_for_get_url {
+                cmd_a.arg("--cookies").arg(path);
+            }
+            let out_a = cmd_a.output().map_err(|e| format!("cmd_a exec failed: {}", e))?;
+            if !out_a.status.success() {
+                let stderr = String::from_utf8_lossy(&out_a.stderr);
+                return Err(format!("yt-dlp audio get-url failed: {}", stderr.trim()));
+            }
+            let url_a = String::from_utf8_lossy(&out_a.stdout);
+            let url_a = url_a.lines().find(|l| !l.trim().is_empty())
+                .ok_or("Audio URL was empty")?.trim().to_string();
+                
+            Ok((url_v, url_a))
         })
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "yt-dlp failed to get video or audio URL".to_string())?;
+        .map_err(|e| e.to_string())?;
 
-        return Ok((video_url, audio_url));
+        match urls_result {
+            Ok(urls) => return Ok(urls),
+            Err(e) => {
+                log::error!("[YTDLP-URL ERROR] cookie attempt failed: {}", e);
+                last_error = e;
+                continue;
+            }
+        }
     }
 
-    Err("Could not get separate video and audio URLs for any cookie attempt".to_string())
+    Err(format!("Could not get separate video and audio URLs for any cookie attempt. Last error: {}", last_error))
 }
 
 fn stream_ffmpeg_merged_response(video_url: &str, audio_url: &str) -> HttpResponse {
@@ -839,48 +1073,23 @@ fn stream_ffmpeg_merged_response(video_url: &str, audio_url: &str) -> HttpRespon
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     let user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0 Safari/537.36";
     let headers_arg = "Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com";
+    
+    let ffmpeg = ffmpeg_binary();
+    
     std::thread::spawn(move || {
-        let mut child = match Command::new("ffmpeg")
+        let mut child = match Command::new(&ffmpeg)
             .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-nostdin",
-                "-reconnect",
-                "1",
-                "-reconnect_streamed",
-                "1",
-                "-reconnect_at_eof",
-                "1",
-                "-reconnect_delay_max",
-                "10",
-                "-user_agent",
-                user_agent,
-                "-headers",
-                headers_arg,
-                "-i",
-                &video_url,
-                "-user_agent",
-                user_agent,
-                "-headers",
-                headers_arg,
-                "-i",
-                &audio_url,
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "160k",
-                "-movflags",
-                "frag_keyframe+empty_moov",
-                "-f",
-                "mp4",
-                "-",
+                "-hide_banner", "-loglevel", "error", "-nostdin",
+                "-reconnect", "1", "-reconnect_streamed", "1",
+                "-reconnect_at_eof", "1", "-reconnect_delay_max", "10",
+                "-user_agent", user_agent, "-headers", headers_arg,
+                "-i", &video_url,
+                "-user_agent", user_agent, "-headers", headers_arg,
+                "-i", &audio_url,
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+                "-movflags", "frag_keyframe+empty_moov", // Важные флаги для потокового MP4
+                "-f", "mp4", "-"
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -896,17 +1105,18 @@ fn stream_ffmpeg_merged_response(video_url: &str, audio_url: &str) -> HttpRespon
                 return;
             }
         };
+        
+        // Логирование ошибок
         if let Some(mut stderr) = child.stderr.take() {
             std::thread::spawn(move || {
                 let mut line = String::new();
-                let mut buf = [0u8; 512];
+                let mut buf =[0u8; 512];
                 while let Ok(n) = stderr.read(&mut buf) {
-                    if n == 0 {
-                        break;
-                    }
+                    if n == 0 { break; }
                     for &b in &buf[..n] {
-                        if b == b'\n' || b == b'\r' {
+                         if b == b'\n' || b == b'\r' {
                             if !line.is_empty() {
+                                log::error!("[FFMPEG MUX ERROR]: {}", line);
                                 line.clear();
                             }
                         } else {
@@ -914,13 +1124,14 @@ fn stream_ffmpeg_merged_response(video_url: &str, audio_url: &str) -> HttpRespon
                         }
                     }
                 }
-                if !line.is_empty() {}
             });
         }
+        
         let mut stdout = match child.stdout.take() {
             Some(s) => s,
             None => return,
         };
+        
         let mut buf = [0u8; CHUNK];
         loop {
             match stdout.read(&mut buf) {
@@ -939,10 +1150,13 @@ fn stream_ffmpeg_merged_response(video_url: &str, audio_url: &str) -> HttpRespon
             }
         }
     });
+    
     let stream = ReceiverStream::new(rx).map(|r| r.map(web::Bytes::from).map_err(actix_web::error::ErrorInternalServerError));
     HttpResponse::Ok()
         .insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")))
-        .insert_header(("Accept-Ranges", "bytes"))
+        // ВАЖНО: Убираем Accept-Ranges, чтобы клиент не пытался делать seek-запросы,
+        // которые убивают ffmpeg-пайплайн.
+        .insert_header(("Cache-Control", "no-cache"))
         .streaming(stream)
 }
 
@@ -957,22 +1171,21 @@ fn stream_converted_video(
     let ua = user_agent.to_string();
     let codec_str = codec.to_string();
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    
+    let ffmpeg = ffmpeg_binary(); // Находим FFmpeg
 
     std::thread::spawn(move || {
-        let _permit = _permit; // moved into thread; dropped when thread exits
+        let _permit = _permit;
         let temp_dir = env::temp_dir();
         let temp_file_name = format!(
             "yt_api_video_{}_{}.{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis(),
             std::process::id(),
             if codec_str == "mpeg4" { "mp4" } else { "3gp" }
         );
         let temp_file_path = temp_dir.join(temp_file_name);
 
-        let mut cmd = Command::new("ffmpeg");
+        let mut cmd = Command::new(&ffmpeg); // Запускаем найденный FFmpeg
         cmd.args([
             "-hide_banner", "-loglevel", "error", "-nostdin",
             "-reconnect", "1",
@@ -1001,8 +1214,7 @@ fn stream_converted_video(
         let temp_path_str = temp_file_path.to_string_lossy().to_string();
         cmd.arg(&temp_path_str);
 
-        cmd.stdin(Stdio::null())
-            .stderr(Stdio::piped());
+        cmd.stdin(Stdio::null()).stderr(Stdio::piped());
 
         let output = match cmd.output() {
             Ok(o) => o,
@@ -1034,9 +1246,7 @@ fn stream_converted_video(
                     match file.read(&mut buffer) {
                         Ok(0) => break,
                         Ok(n) => {
-                            if tx.blocking_send(Ok(Bytes::copy_from_slice(&buffer[..n]))).is_err() {
-                                break;
-                            }
+                            if tx.blocking_send(Ok(Bytes::copy_from_slice(&buffer[..n]))).is_err() { break; }
                         }
                         Err(e) => {
                             let _ = tx.blocking_send(Err(e));
@@ -1144,9 +1354,9 @@ async fn resolve_direct_stream_url(
             .map(|p| p.display().to_string())
             .collect();
         if names.is_empty() {
-            crate::log::info!("Cookies enabled; found 0 files");
+            log::info!("Cookies enabled; found 0 files");
         } else {
-            crate::log::info!(
+            log::info!(
                 "Cookies enabled; found {} files: {}",
                 names.len(),
                 names.join(", ")
@@ -1159,7 +1369,9 @@ async fn resolve_direct_stream_url(
         let format_selector = if audio_only {
             "bestaudio/best".to_string()
         } else {
-            format!("best[height<={}][ext=mp4]/best[ext=mp4]/best", quality)
+            // Превращаем "1080p" в число 1080, чтобы yt-dlp не выдал ошибку синтаксиса
+            let numeric_height = parse_quality_height(&quality).unwrap_or(360);
+            format!("best[height<={}][ext=mp4]/best[ext=mp4]/best", numeric_height)
         };
 
         let mut attempts: Vec<Option<PathBuf>> = Vec::new();
@@ -1203,7 +1415,7 @@ async fn resolve_direct_stream_url(
                             output.status, stderr
                         )
                     };
-                    crate::log::info!("{}", msg);
+                    log::info!("{}", msg);
                     last_err = Some(msg);
                 }
                 Err(e) => {
@@ -1212,7 +1424,7 @@ async fn resolve_direct_stream_url(
                     } else {
                         format!("yt-dlp exec error: {}", e)
                     };
-                    crate::log::info!("{}", msg);
+                    log::info!("{}", msg);
                     last_err = Some(msg);
                 }
             }
@@ -1268,7 +1480,7 @@ async fn proxy_stream_response(
             builder.streaming(stream)
         }
         Err(e) => {
-            crate::log::info!("Proxy request failed: {}", e);
+            log::info!("Proxy request failed: {}", e);
             HttpResponse::BadGateway().json(serde_json::json!({
                 "error": "Failed to proxy request"
             }))
@@ -1626,14 +1838,14 @@ pub async fn get_ytvideo_info(
         Ok(resp) => match resp.text().await {
             Ok(text) => text,
             Err(e) => {
-                crate::log::info!("Error fetching video page: {}", e);
+                log::info!("Error fetching video page: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": "Failed to fetch video page"
                 }));
             }
         },
         Err(e) => {
-            crate::log::info!("Error fetching video page: {}", e);
+            log::info!("Error fetching video page: {}", e);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to fetch video page"
             }));
@@ -1674,12 +1886,12 @@ pub async fn get_ytvideo_info(
         Ok(resp) => match resp.json::<serde_json::Value>().await {
             Ok(data) => data,
             Err(e) => {
-                crate::log::info!("Error parsing next response: {}", e);
+                log::info!("Error parsing next response: {}", e);
                 serde_json::Value::Null
             }
         },
         Err(e) => {
-            crate::log::info!("Error calling next endpoint: {}", e);
+            log::info!("Error calling next endpoint: {}", e);
             serde_json::Value::Null
         }
     };
@@ -1703,12 +1915,12 @@ pub async fn get_ytvideo_info(
             Ok(resp) => match resp.json::<serde_json::Value>().await {
                 Ok(data) => data,
                 Err(e) => {
-                    crate::log::info!("Error parsing continuation response: {}", e);
+                    log::info!("Error parsing continuation response: {}", e);
                     serde_json::Value::Null
                 }
             },
             Err(e) => {
-                crate::log::info!("Error calling continuation endpoint: {}", e);
+                log::info!("Error calling continuation endpoint: {}", e);
                 serde_json::Value::Null
             }
         };
@@ -1990,7 +2202,7 @@ pub async fn get_related_videos(
     {
         Ok(resp) => resp.text().await.unwrap_or_default(),
         Err(e) => {
-            crate::log::info!("Error fetching watch page: {}", e);
+            log::info!("Error fetching watch page: {}", e);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to fetch video page"
             }));
@@ -2018,14 +2230,14 @@ pub async fn get_related_videos(
         Ok(resp) => match resp.json::<serde_json::Value>().await {
             Ok(json) => json,
             Err(e) => {
-                crate::log::info!("Error parsing next response: {}", e);
+                log::info!("Error parsing next response: {}", e);
                 return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": "Failed to parse response"
                 }));
             }
         },
         Err(e) => {
-            crate::log::info!("Error making next request: {}", e);
+            log::info!("Error making next request: {}", e);
             return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to fetch related videos"
             }));
@@ -2205,17 +2417,16 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
         }
     };
 
+    // 1. Старые кодеки (всегда конвертация на лету)
     let codec = query_params.get("codec").map(|c| c.as_str());
-
 	if let Some(codec_str) = codec {
 		if codec_str != "mpeg4" && codec_str != "h263" {
 			return HttpResponse::BadRequest().json(serde_json::json!({
 				"error": "Unsupported codec",
 				"details": format!("Codec '{}' is not supported. Available: mpeg4, h263", codec_str),
-				"supported_codecs": ["mpeg4", "h263"]
+				"supported_codecs":["mpeg4", "h263"]
 			}));
 		}
-
 		let direct_url = match resolve_direct_stream_url(&video_id, Some("360"), false, &data.config).await {
 			Ok(url) => url,
 			Err(e) => {
@@ -2225,108 +2436,91 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
 				}));
 			}
 		};
-
 		let user_agent = data.config.get_innertube_user_agent();
 		let permit = data.codec_semaphore.clone().acquire_owned().await.ok();
 		return stream_converted_video(&direct_url, &user_agent, &video_id, codec_str, permit);
 	}
 
+    // 2. HLS
     let hls_only = query_params.get("hls").map(|v| v == "true").unwrap_or(false);
-
     if hls_only {
         match get_hls_manifest_url(&video_id, &data.config).await {
             Ok(manifest_url) => {
-                HttpResponse::Ok().json(serde_json::json!({
+                return HttpResponse::Ok().json(serde_json::json!({
                     "hls_manifest_url": manifest_url,
                     "video_id": video_id,
-                    "message": "HLS Master Manifest URL - use this for streams without quality selection"
-                }))
+                    "message": "HLS Manifest URL ready"
+                }));
             },
             Err(e) => {
-                HttpResponse::InternalServerError().json(serde_json::json!({
+                return HttpResponse::InternalServerError().json(serde_json::json!({
                     "error": "Failed to get HLS manifest URL",
                     "details": e
-                }))
+                }));
             }
         }
-    } else {
-        let quality = query_params.get("quality").map(|q| q.as_str());
-        let proxy_param = query_params
-            .get("proxy")
-            .map(|p| p.to_lowercase())
-            .unwrap_or_else(|| "true".to_string());
-        let use_proxy = proxy_param != "false";
+    } 
 
-        let use_quality_hls = quality.and_then(|q| parse_quality_height(q)).is_some();
-        if use_quality_hls {
-            let height = quality.and_then(|q| parse_quality_height(q)).unwrap();
-            match fetch_player_response(&video_id, &data.config).await {
-                Ok(player_data) => {
-                    if let Ok((master_url, duration_seconds)) =
-                        get_hls_manifest_url_and_duration_from_player(&player_data)
-                    {
-                        let ua = data.config.get_innertube_user_agent();
-                        if let Ok(master_body) = fetch_hls_master_body(&master_url, &ua).await {
-                            let audio_groups = parse_hls_audio_groups(&master_body, &master_url);
-                            let variants =
-                                parse_hls_master_variants(&master_body, &master_url, &audio_groups);
-                            if let Some((video_url, audio_url)) =
-                                pick_hls_variant_for_height(&variants, height)
-                            {
-                                let cache_path = hls_merge_cache_path(&video_id, height);
-                                if !cache_path.exists() {
-                                    let v_url = video_url.clone();
-                                    let a_url = audio_url.clone();
-                                    let c_path = cache_path.clone();
-                                    let ua = data.config.get_innertube_user_agent().to_string();
-                                    match task::spawn_blocking(move || {
-                                        run_ffmpeg_hls_to_file(v_url, a_url, c_path, ua)
-                                    })
-                                    .await
-                                    {
-                                        Ok(Ok(())) => {}
-                                        Ok(Err(e)) => {
-                                            return HttpResponse::InternalServerError().json(
-                                                serde_json::json!({
-                                                    "error": "FFmpeg HLS merge failed",
-                                                    "details": e
-                                                }),
-                                            );
-                                        }
-                                        Err(e) => {
-                                            return HttpResponse::InternalServerError().json(
-                                                serde_json::json!({
-                                                    "error": "Task join error",
-                                                    "details": e.to_string()
-                                                }),
-                                            );
-                                        }
-                                    }
-                                }
-                                return serve_mp4_from_cache(
-                                    &cache_path,
-                                    &req,
-                                    duration_seconds,
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(_) => {}
+    let proxy_param = query_params.get("proxy").map(|p| p.to_lowercase()).unwrap_or_else(|| "true".to_string());
+    let use_proxy = proxy_param != "false";
+
+    // Получаем инфо о видео
+    let player_response = match fetch_player_response(&video_id, &data.config).await {
+        Ok(data) => data,
+        Err(e) => {
+             return HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Failed to fetch player response",
+                "details": e
+            }));
+        }
+    };
+
+    let duration_seconds = get_duration_from_player_response(&player_response);
+    let requested_quality = query_params.get("quality").map(|q| q.as_str());
+    
+    let mut target_height = requested_quality
+        .and_then(|q| parse_quality_height(q))
+        .unwrap_or_else(|| parse_quality_height(&data.config.video.default_quality).unwrap_or(360));
+
+    // --- ЛОГИКА КАЧЕСТВА ---
+
+    // 1. Длинные видео (> 10 мин) и высокое качество -> Форсируем 360p
+    if target_height > 360 && duration_seconds > 600 {
+        log::info!("Video > 10m ({}s). Forcing 360p for stability.", duration_seconds);
+        target_height = 360;
+    }
+
+    // 2. Короткие видео (< 10 мин) и высокое качество -> Скачиваем целиком на сервер
+    // 2. Короткие видео (< 10 мин) и высокое качество -> Скачиваем целиком на сервер
+    // 2. Короткие видео (< 10 мин) и высокое качество -> Скачиваем целиком на сервер
+    if target_height > 360 && use_proxy {
+        log::info!("Short video ({}s) in {}p. Downloading full file via yt-dlp...", duration_seconds, target_height);
+        
+        // Теперь здесь создастся файл вида yt_api_video_ID_1080p.mp4
+        match download_mux_to_temp_file(video_id.clone(), target_height).await {
+            Ok(path) => {
+                log::info!("Download complete: {}. Serving file.", path.display());
+                return serve_mp4_from_cache(&path, &req, Some(duration_seconds));
+            },
+            Err(e) => {
+                 log::error!("Failed to download/mux video: {}", e);
+                 return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Failed to prepare video file",
+                    "details": e
+                }));
             }
         }
+    }
 
-        let direct_url = if quality.is_none() {
-            fetch_player_response(&video_id, &data.config)
-                .await
-                .ok()
-                .and_then(|data| get_direct_stream_url_from_player_response(&data))
-        } else {
-            None
-        };
-        let direct_url = match direct_url {
-            Some(url) => url,
-            None => match resolve_direct_stream_url(&video_id, quality, false, &data.config).await {
+    // 3. Fallback или 360p -> Прямая ссылка
+    // Сюда попадаем, если качество <= 360
+    let direct_url = get_direct_stream_url_from_player_response(&player_response);
+    
+    let final_url = match direct_url {
+        Some(u) => u,
+        None => {
+             log::warn!("Falling back to yt-dlp for direct URL");
+             match resolve_direct_stream_url(&video_id, Some("360"), false, &data.config).await {
                 Ok(url) => url,
                 Err(e) => {
                     return HttpResponse::InternalServerError().json(serde_json::json!({
@@ -2334,32 +2528,32 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
                         "details": e
                     }));
                 }
-            }
-        };
-
-        if req.method() == actix_web::http::Method::HEAD {
-            let client = Client::new();
-            match client.head(&direct_url).send().await {
-                Ok(resp) => {
-                    let mut builder = HttpResponse::build(resp.status());
-                    if let Some(len) = resp.headers().get(CONTENT_LENGTH) {
-                        builder.insert_header((CONTENT_LENGTH, len.clone()));
-                    }
-                    if let Some(range) = resp.headers().get(CONTENT_RANGE) {
-                        builder.insert_header((CONTENT_RANGE, range.clone()));
-                    }
-                    builder.insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")));
-                    builder.finish()
-                }
-                Err(_) => HttpResponse::Ok().finish(),
-            }
-        } else if !use_proxy {
-            HttpResponse::Found()
-                .insert_header((LOCATION, direct_url))
-                .finish()
-        } else {
-            proxy_stream_response(&direct_url, &req, "video/mp4").await
+             }
         }
+    };
+
+    if req.method() == actix_web::http::Method::HEAD {
+        let client = Client::new();
+        match client.head(&final_url).send().await {
+            Ok(resp) => {
+                let mut builder = HttpResponse::build(resp.status());
+                if let Some(len) = resp.headers().get(CONTENT_LENGTH) {
+                    builder.insert_header((CONTENT_LENGTH, len.clone()));
+                }
+                if let Some(range) = resp.headers().get(CONTENT_RANGE) {
+                    builder.insert_header((CONTENT_RANGE, range.clone()));
+                }
+                builder.insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")));
+                builder.finish()
+            }
+            Err(_) => HttpResponse::Ok().finish(),
+        }
+    } else if !use_proxy {
+        HttpResponse::Found()
+            .insert_header((LOCATION, final_url))
+            .finish()
+    } else {
+        proxy_stream_response(&final_url, &req, "video/mp4").await
     }
 }
 
@@ -2980,68 +3174,45 @@ fn run_ffmpeg_hls_to_file(
     let out_path = tmp_path.to_string_lossy().to_string();
 
     let mut args: Vec<String> = vec![
-        "-hide_banner".into(),
-        "-loglevel".into(),
-        "error".into(),
-        "-nostdin".into(),
-        "-reconnect".into(),
-        "1".into(),
-        "-reconnect_streamed".into(),
-        "1".into(),
-        "-reconnect_at_eof".into(),
-        "1".into(),
-        "-reconnect_delay_max".into(),
-        "10".into(),
-        "-user_agent".into(),
-        user_agent.clone(),
-        "-headers".into(),
-        headers_arg.to_string(),
-        "-i".into(),
-        video_url.clone(),
+        "-hide_banner".into(), "-loglevel".into(), "error".into(), "-nostdin".into(),
+        "-reconnect".into(), "1".into(), "-reconnect_streamed".into(), "1".into(),
+        "-reconnect_at_eof".into(), "1".into(), "-reconnect_delay_max".into(), "10".into(),
+        "-user_agent".into(), user_agent.clone(), "-headers".into(), headers_arg.to_string(),
+        "-i".into(), video_url.clone(),
     ];
     if let Some(ref audio) = audio_url {
         args.extend([
-            "-user_agent".into(),
-            user_agent,
-            "-headers".into(),
-            headers_arg.to_string(),
-            "-i".into(),
-            audio.clone(),
+            "-user_agent".into(), user_agent, "-headers".into(), headers_arg.to_string(),
+            "-i".into(), audio.clone(),
         ]);
     }
     if audio_url.is_some() {
         args.extend([
-            "-map".into(),
-            "0:v:0".into(),
-            "-map".into(),
-            "1:a:0".into(),
-            "-c:v".into(),
-            "copy".into(),
-            "-c:a".into(),
-            "aac".into(),
-            "-b:a".into(),
-            "160k".into(),
+            "-map".into(), "0:v:0".into(), "-map".into(), "1:a:0".into(),
+            "-c:v".into(), "copy".into(), "-c:a".into(), "aac".into(), "-b:a".into(), "160k".into(),
         ]);
     } else {
         args.extend(["-c".into(), "copy".into()]);
     }
     args.extend([
-        "-movflags".into(),
-        "frag_keyframe+empty_moov".into(),
-        "-f".into(),
-        "mp4".into(),
-        out_path,
+        "-movflags".into(), "frag_keyframe+empty_moov".into(),
+        "-f".into(), "mp4".into(), out_path,
     ]);
 
-    let status = Command::new("ffmpeg")
+    // Получаем ТОЧНЫЙ АБСОЛЮТНЫЙ ПУТЬ до ffmpeg.exe
+    let ffmpeg_path = ffmpeg_binary(); 
+    
+    // Передаем этот путь в Command
+    let status = Command::new(&ffmpeg_path)
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("ffmpeg spawn: {}", e))?
+        .map_err(|e| format!("ffmpeg spawn at '{}': {}", ffmpeg_path, e))?
         .wait()
         .map_err(|e| format!("ffmpeg wait: {}", e))?;
+        
     if !status.success() {
         return Err(format!("ffmpeg exit: {}", status));
     }
@@ -3155,6 +3326,9 @@ fn stream_hls_to_mp4_response(
     let user_agent = user_agent.to_string();
     let headers_arg = "Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com";
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
+    
+    let ffmpeg = ffmpeg_binary(); 
+
     std::thread::spawn(move || {
         let args: Vec<&str> = match &audio_url {
             None => vec![
@@ -3177,7 +3351,8 @@ fn stream_hls_to_mp4_response(
                 "-f", "mp4", "-",
             ],
         };
-        let mut child = match Command::new("ffmpeg").args(args)
+        
+        let mut child = match Command::new(&ffmpeg).args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -3189,41 +3364,47 @@ fn stream_hls_to_mp4_response(
                 return;
             }
         };
+        
         if let Some(mut stderr) = child.stderr.take() {
             std::thread::spawn(move || {
                 let mut line = String::new();
-                let mut buf = [0u8; 512];
+                let mut buf =[0u8; 512];
                 while let Ok(n) = stderr.read(&mut buf) {
-                    if n == 0 {
-                        break;
-                    }
+                    if n == 0 { break; }
                     for &b in &buf[..n] {
                         if b == b'\n' || b == b'\r' {
-                            if !line.is_empty() {
-                                line.clear();
+                            if !line.is_empty() { 
+                                log::error!("[FFMPEG HLS ERROR]: {}", line);
+                                line.clear(); 
                             }
                         } else {
                             line.push(b as char);
                         }
                     }
                 }
-                if !line.is_empty() {
-                }
             });
         }
+        
         let mut stdout = match child.stdout.take() {
             Some(s) => s,
             None => return,
         };
+        
         let mut cache_file: Option<fs::File> = cache_path.as_ref().and_then(|p| {
             let tmp = p.with_extension("tmp");
             fs::File::create(&tmp).ok()
         });
+        
         const CHUNK: usize = 65536;
         let mut buf = [0u8; CHUNK];
+        let mut stream_completed = false; // Флаг успешного завершения потока
+        
         loop {
             match stdout.read(&mut buf) {
-                Ok(0) => break,
+                Ok(0) => {
+                    stream_completed = true;
+                    break;
+                },
                 Ok(n) => {
                     let chunk = Bytes::from(buf[..n].to_vec());
                     if let Some(ref mut f) = cache_file {
@@ -3241,13 +3422,24 @@ fn stream_hls_to_mp4_response(
                 }
             }
         }
-        if let (Some(f), Some(p)) = (cache_file, cache_path) {
+        
+        // Исправленная логика сохранения кэша
+        if let Some(f) = cache_file {
             let _ = f.sync_all();
-            drop(f);
-            let tmp = p.with_extension("tmp");
-            let _ = fs::rename(&tmp, &p);
+            drop(f); // Закрываем дескриптор файла до попытки его переименовать или удалить
+            if let Some(p) = cache_path {
+                let tmp = p.with_extension("tmp");
+                if stream_completed {
+                    log::info!("HLS stream completed. Saving to cache: {}", p.display());
+                    let _ = fs::rename(&tmp, &p);
+                } else {
+                    log::info!("HLS stream aborted by user. Discarding incomplete cache.");
+                    let _ = fs::remove_file(&tmp); // Удаляем битый недокачанный кусок
+                }
+            }
         }
     });
+    
     let stream = ReceiverStream::new(rx)
         .map(|r| r.map(web::Bytes::from).map_err(actix_web::error::ErrorInternalServerError));
     let mut builder = HttpResponse::Ok();
