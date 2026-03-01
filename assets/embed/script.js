@@ -13,6 +13,59 @@ var videoContainer = document.querySelector(".video-container");
 var timelineContainer = document.querySelector(".timeline-container");
 var video = document.querySelector("video");
 
+window.isEventInsidePlayer = function (e) {
+  var target = e.target || e.srcElement;
+  if (!target || !videoContainer) return false;
+  if (videoContainer.contains) return videoContainer.contains(target);
+  while (target) {
+    if (target === videoContainer) return true;
+    target = target.parentNode;
+  }
+  return false;
+};
+
+/* ===========================
+   DURATION FROM HEADERS (for IE / streaming when video.duration is NaN)
+=========================== */
+
+var durationFromHeader = NaN;
+
+function getDuration() {
+  if (durationFromHeader >= 0 && !isNaN(durationFromHeader)) return durationFromHeader;
+  var d = video.duration;
+  return (d >= 0 && !isNaN(d)) ? d : durationFromHeader;
+}
+
+function fetchDurationFromHeaders(callback) {
+  var src = (video.src || video.getAttribute("src") || "").trim();
+  if (!src) {
+    if (callback) callback();
+    return;
+  }
+  var xhr;
+  if (window.XMLHttpRequest) {
+    xhr = new XMLHttpRequest();
+  } else if (window.ActiveXObject) {
+    try { xhr = new ActiveXObject("Microsoft.XMLHTTP"); } catch (e) { if (callback) callback(); return; }
+  } else {
+    if (callback) callback();
+    return;
+  }
+  xhr.open("HEAD", src, true);
+  xhr.onreadystatechange = function () {
+    if (xhr.readyState !== 4) return;
+    var h = (xhr.getResponseHeader && (xhr.getResponseHeader("X-Content-Duration") || xhr.getResponseHeader("Content-Duration") || xhr.getResponseHeader("X-Duration-Seconds"))) || null;
+    if (h) {
+      var sec = parseInt(h, 10);
+      if (!isNaN(sec) && sec >= 0) {
+        durationFromHeader = sec;
+        if (totalTimeElem) totalTimeElem.innerHTML = formatDuration(sec);
+      }
+    }
+    if (callback) callback();
+  };
+  try { xhr.send(null); } catch (e) { if (callback) callback(); }
+}
 
 /* ===========================
    INITIAL TIME
@@ -20,6 +73,9 @@ var video = document.querySelector("video");
 
 currentTimeElem.innerHTML = "0:00";
 totalTimeElem.innerHTML = "0:00";
+
+/* Fetch duration from response headers (same-origin) so it works in old IE and when video.duration is not available */
+fetchDurationFromHeaders();
 
 /* ===========================
    AUTOPLAY
@@ -205,7 +261,27 @@ document.addEventListener("keydown", function (e) {
    KEYBOARD CONTROLS
 =========================== */
 
+/** IE-safe: true if focus is in an input/textarea/select (e.g. search box) — тогда не управлять плеером с клавиатуры */
+function isFocusInFormControl() {
+  var el = document.activeElement;
+  if (!el || !el.tagName) return false;
+  var tag = (el.tagName + "").toUpperCase();
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (el.contentEditable === "true" || el.contentEditable === true) return true;
+  return false;
+}
+
 document.addEventListener("keydown", function (e) {
+  if (isFocusInFormControl()) return;
+
+  // F — fullscreen: симулируем клик по кнопке плеера (в старом IE вызов из keydown даёт чёрный экран, клик по кнопке — нет)
+  if (e.key === "f" || e.key === "F" || e.keyCode === 70) {
+    e.preventDefault();
+    var img = fullScreenBtn.querySelector(isInFullscreen() ? 'img[alt="Exit fullscreen"]' : 'img[alt="Enter fullscreen"]');
+    setTimeout(function () { (img || fullScreenBtn).click(); }, 0);
+    return;
+  }
+
   // Prevent default behavior for handled keys
   if ([32, 37, 39].indexOf(e.keyCode) !== -1) {
     e.preventDefault();
@@ -226,11 +302,14 @@ document.addEventListener("keydown", function (e) {
   }
   
   // Right Arrow - Seek forward 10 seconds
+  var dur = getDuration();
   if (e.key === "ArrowRight" || e.keyCode === 39) {
-    if (video.currentTime <= video.duration - 10) {
-      video.currentTime += 10;
-    } else {
-      video.currentTime = video.duration;
+    if (dur >= 0 && !isNaN(dur)) {
+      if (video.currentTime <= dur - 10) {
+        video.currentTime += 10;
+      } else {
+        video.currentTime = dur;
+      }
     }
   }
 });
@@ -251,7 +330,8 @@ document.addEventListener("mousemove", scrubbingMove);
 document.addEventListener("mouseup", stopScrubbing);
 
 function startScrubbing(e) {
-  if (!video.duration || isNaN(video.duration)) return;
+  var d = getDuration();
+  if (d < 0 || isNaN(d)) return;
 
   isScrubbing = true;
   wasPaused = video.paused;
@@ -270,7 +350,8 @@ function stopScrubbing(e) {
 
   isScrubbing = false;
   updateTimeline(e);
-  video.currentTime = getPercent(e) * video.duration;
+  var d = getDuration();
+  if (d >= 0 && !isNaN(d)) video.currentTime = getPercent(e) * d;
 
   if (!wasPaused) video.play();
   videoContainer.className = videoContainer.className.replace(/\bscrubbing\b/g, "").trim();
@@ -302,17 +383,19 @@ function updateTimeline(e) {
 =========================== */
 
 video.addEventListener("loadedmetadata", function () {
-  totalTimeElem.innerHTML = formatDuration(video.duration);
+  var d = getDuration();
+  if (d >= 0 && !isNaN(d)) totalTimeElem.innerHTML = formatDuration(d);
 });
 
 video.addEventListener("timeupdate", function () {
-  if (!video.duration || isNaN(video.duration)) return;
+  var d = getDuration();
+  if (d < 0 || isNaN(d)) return;
 
   currentTimeElem.innerHTML = formatDuration(video.currentTime);
 
   if (isScrubbing) return;
 
-  var percent = video.currentTime / video.duration;
+  var percent = d > 0 ? video.currentTime / d : 0;
   var timeline = timelineContainer.querySelector(".timeline");
   var thumb = timelineContainer.querySelector(".thumb-indicator");
 
@@ -401,6 +484,46 @@ video.addEventListener("error", function () {
 });
 
 /* ===========================
+   LOADING ICON (play/pause button shows loading.gif while video loads; IE-safe className)
+=========================== */
+
+function addVideoEvent(el, eventName, fn) {
+  if (!el) return;
+  if (el.attachEvent) el.attachEvent("on" + eventName, fn);
+  else el.addEventListener(eventName, fn);
+}
+
+function setLoading(show) {
+  if (!videoContainer) return;
+  var cn = videoContainer.className;
+  if (show) {
+    if (cn.indexOf("loading") === -1) videoContainer.className = (cn + " loading").replace(/\s+/g, " ").trim();
+  } else {
+    videoContainer.className = cn.replace(/\bloading\b/g, "").replace(/\s+/g, " ").trim();
+  }
+  if (playPauseBtn) {
+    if (show) {
+      playPauseBtn.setAttribute("disabled", "disabled");
+    } else {
+      playPauseBtn.removeAttribute("disabled");
+    }
+  }
+}
+
+function bindLoadingState() {
+  function showLoading() { setLoading(true); }
+  function hideLoading() { setLoading(false); }
+  addVideoEvent(video, "loadstart", showLoading);
+  addVideoEvent(video, "waiting", showLoading);
+  addVideoEvent(video, "canplay", hideLoading);
+  addVideoEvent(video, "canplaythrough", hideLoading);
+  addVideoEvent(video, "playing", hideLoading);
+  addVideoEvent(video, "error", hideLoading);
+}
+setLoading(true);
+bindLoadingState();
+
+/* ===========================
    SETTINGS PANEL (IE-safe: addEventListener + attachEvent, className)
 =========================== */
 
@@ -474,30 +597,50 @@ if (settingsPanel) {
     }
   }
   var qualitySelect = settingsPanel.querySelector(".settings-quality");
-  if (qualitySelect) {
-    function applyQuality() {
-      var val = qualitySelect.value;
-      var src = video.src || video.getAttribute("src") || "";
-      if (!src) return;
-      src = src.replace(/\bquality=[^&]*&?/g, "").replace(/[&?]$/, "");
-      var sep = src.indexOf("?") >= 0 ? "&" : "?";
-      var wasPlaying = !video.paused;
-      var seekTo = video.currentTime;
-      video.src = src + sep + "quality=" + val;
-      video.load();
-      function restorePlay() {
-        video.removeEventListener("loadedmetadata", restorePlay);
-        video.removeEventListener("canplay", restorePlay);
-        if (seekTo > 0) video.currentTime = seekTo;
-        if (wasPlaying) video.play();
-      }
-      video.addEventListener("loadedmetadata", restorePlay);
-      video.addEventListener("canplay", restorePlay);
+  var codecSelect = settingsPanel.querySelector(".settings-codec");
+  function buildSrcWithParams(baseSrc) {
+    if (!baseSrc) return "";
+    var src = baseSrc
+      .replace(/\bquality=[^&]*&?/g, "")
+      .replace(/\bcodec=[^&]*&?/g, "")
+      .replace(/[&?]$/, "");
+    var sep = src.indexOf("?") >= 0 ? "&" : "?";
+    var quality = qualitySelect ? qualitySelect.value : "auto";
+    var codec = codecSelect ? codecSelect.value : "";
+    src = src + sep + "quality=" + quality;
+    if (codec === "mpeg4") src = src + "&codec=mpeg4";
+    return src;
+  }
+  function applySourceAndReload() {
+    var base = video.src || video.getAttribute("src") || "";
+    if (!base) return;
+    var wasPlaying = !video.paused;
+    var seekTo = video.currentTime;
+    durationFromHeader = NaN;
+    video.src = buildSrcWithParams(base);
+    video.load();
+    fetchDurationFromHeaders();
+    function restorePlay() {
+      video.removeEventListener("loadedmetadata", restorePlay);
+      video.removeEventListener("canplay", restorePlay);
+      if (seekTo > 0) video.currentTime = seekTo;
+      if (wasPlaying) video.play();
     }
+    video.addEventListener("loadedmetadata", restorePlay);
+    video.addEventListener("canplay", restorePlay);
+  }
+  if (qualitySelect) {
     if (qualitySelect.attachEvent) {
-      qualitySelect.attachEvent("onchange", applyQuality);
+      qualitySelect.attachEvent("onchange", applySourceAndReload);
     } else {
-      qualitySelect.addEventListener("change", applyQuality);
+      qualitySelect.addEventListener("change", applySourceAndReload);
+    }
+  }
+  if (codecSelect) {
+    if (codecSelect.attachEvent) {
+      codecSelect.attachEvent("onchange", applySourceAndReload);
+    } else {
+      codecSelect.addEventListener("change", applySourceAndReload);
     }
   }
 }
@@ -688,10 +831,18 @@ function handleUserActivity() {
   resetInactivityTimer();
 }
 
+
+
 var userActivityEvents = ["mousemove", "mousedown", "touchstart", "touchmove", "keydown", "wheel", "mousewheel", "pointermove", "pointerdown", "MSPointerMove", "MSPointerDown"];
 
 userActivityEvents.forEach(function (eventName) {
-  document.addEventListener(eventName, handleUserActivity, true);
+  document.addEventListener(eventName, function (e) {
+    if (eventName === "keydown") {
+      handleUserActivity();
+      return;
+    }
+    if (window.isEventInsidePlayer(e)) handleUserActivity();
+  }, true);
 });
 
 var activityOverlay = document.querySelector(".video-activity-overlay");
@@ -699,7 +850,6 @@ if (videoContainer) {
   userActivityEvents.forEach(function (eventName) {
     videoContainer.addEventListener(eventName, handleUserActivity, true);
   });
-  videoContainer.addEventListener("mouseenter", handleUserActivity, true);
 }
 if (activityOverlay) {
   userActivityEvents.forEach(function (eventName) {
