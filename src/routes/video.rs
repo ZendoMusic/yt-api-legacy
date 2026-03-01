@@ -2484,15 +2484,15 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
 
     // --- ЛОГИКА КАЧЕСТВА ---
 
-    // 1. Длинные видео (> 10 мин) и высокое качество -> Форсируем 360p
-    if target_height > 360 && duration_seconds > 600 {
-        log::info!("Video > 10m ({}s). Forcing 360p for stability.", duration_seconds);
+    // 1. Длинные видео (> 30 мин) и высокое качество -> Форсируем 360p
+    if target_height > 360 && duration_seconds > 1800 {
+        log::info!("Video > 30m ({}s). Forcing 360p for stability.", duration_seconds);
         target_height = 360;
     }
 
-    // 2. Короткие видео (< 10 мин) и высокое качество -> Скачиваем целиком на сервер
-    // 2. Короткие видео (< 10 мин) и высокое качество -> Скачиваем целиком на сервер
-    // 2. Короткие видео (< 10 мин) и высокое качество -> Скачиваем целиком на сервер
+    // 2. Короткие видео (< 30 мин) и высокое качество -> Скачиваем целиком на сервер
+    // 2. Короткие видео (< 30 мин) и высокое качество -> Скачиваем целиком на сервер
+    // 2. Короткие видео (< 30 мин) и высокое качество -> Скачиваем целиком на сервер
     if target_height > 360 && use_proxy {
         log::info!("Short video ({}s) in {}p. Downloading full file via yt-dlp...", duration_seconds, target_height);
         
