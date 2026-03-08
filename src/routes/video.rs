@@ -902,10 +902,10 @@ fn stream_converted_video(
     let codec_str = codec.to_string();
     let (tx, rx) = mpsc::channel::<std::result::Result<Bytes, std::io::Error>>(8);
     
-    let ffmpeg = ffmpeg_binary(); // Находим FFmpeg
+    let ffmpeg = ffmpeg_binary();
 
     std::thread::spawn(move || {
-        let _permit = _permit;
+        let _permit = _permit; // Hold semaphore permit
         let temp_dir = env::temp_dir();
         let temp_file_name = format!(
             "yt_api_video_{}_{}.{}",
@@ -915,16 +915,35 @@ fn stream_converted_video(
         );
         let temp_file_path = temp_dir.join(temp_file_name);
 
-        let mut cmd = Command::new(&ffmpeg); // Запускаем найденный FFmpeg
+        // 1. Download the stream using Rust (reqwest::blocking) instead of FFmpeg
+        // We move the network logic that caused the crash out of FFmpeg
+        let client = reqwest::blocking::Client::new();
+        let download_result = client
+            .get(&source_url)
+            .header("User-Agent", &ua)
+            .header("Referer", "https://www.youtube.com")
+            .header("Origin", "https://www.youtube.com")
+            .send();
+
+        let mut response = match download_result {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.blocking_send(Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to start download: {}", e)
+                )));
+                return;
+            }
+        };
+
+        // 2. Prepare FFmpeg to read from STDIN (pipe:0)
+        let mut cmd = Command::new(&ffmpeg);
         cmd.args([
-            "-hide_banner", "-loglevel", "error", "-nostdin",
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_at_eof", "1",
-            "-reconnect_delay_max", "10",
-            "-user_agent", &ua,
-            "-headers", "Referer: https://www.youtube.com\r\nOrigin: https://www.youtube.com",
-            "-i", &source_url,
+            "-y",
+            "-hide_banner", "-loglevel", "error",
+            // REMOVED: -nostdin (we need stdin!)
+            // REMOVED: -reconnect, -user_agent, -headers, -i URL (network args)
+            "-i", "pipe:0", // Read from Stdin
         ]);
 
         if codec_str == "mpeg4" {
@@ -944,14 +963,49 @@ fn stream_converted_video(
         let temp_path_str = temp_file_path.to_string_lossy().to_string();
         cmd.arg(&temp_path_str);
 
-        cmd.stdin(Stdio::null()).stderr(Stdio::piped());
+        // Configure Stdin to be piped
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let output = match cmd.output() {
-            Ok(o) => o,
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
             Err(e) => {
                 let _ = tx.blocking_send(Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     format!("FFmpeg failed to start: {}", e)
+                )));
+                return;
+            }
+        };
+
+        // 3. Pipe data from HTTP response to FFmpeg stdin
+        // We take() stdin here to get the handle
+        if let Some(mut stdin) = child.stdin.take() {
+            let mut buffer = [0u8; 8192];
+            loop {
+                match response.read(&mut buffer) {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        if stdin.write_all(&buffer[..n]).is_err() {
+                            // FFmpeg might have closed stdin early (error or finished)
+                            break; 
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Network read error: {}", e);
+                        break;
+                    }
+                }
+            }
+        } 
+        // Drop stdin handle to signal EOF to FFmpeg
+
+        // 4. Wait for FFmpeg to finish
+        let output = match child.wait_with_output() {
+            Ok(o) => o,
+            Err(e) => {
+                let _ = tx.blocking_send(Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("FFmpeg wait error: {}", e)
                 )));
                 let _ = fs::remove_file(&temp_file_path);
                 return;
@@ -960,15 +1014,19 @@ fn stream_converted_video(
 
         if !output.status.success() {
             let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
-            log::error!("FFmpeg conversion failed: {}", err_msg);
+            log::error!(
+                "FFmpeg conversion failed. Status: {:?} | STDERR: {}",
+                output.status, err_msg
+            );
             let _ = tx.blocking_send(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("FFmpeg conversion failed: {}", err_msg)
+                format!("FFmpeg failed: {}", err_msg)
             )));
             let _ = fs::remove_file(&temp_file_path);
             return;
         }
 
+        // 5. Stream the resulting file back (Same logic as before)
         match fs::File::open(&temp_file_path) {
             Ok(mut file) => {
                 let mut buffer = [0u8; 65536];
@@ -2157,6 +2215,25 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
 				"supported_codecs":["mpeg4", "h263"]
 			}));
 		}
+
+        // Get video duration and check if it's longer than 40 minutes
+        let player_response = match fetch_player_response(&video_id, &data.config).await {
+            Ok(data) => data,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Failed to fetch player response",
+                    "details": e
+                }));
+            }
+        };
+        let duration_seconds = get_duration_from_player_response(&player_response);
+        if duration_seconds > 3300 {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Video too long for conversion",
+                "details": format!("Video duration ({}s) exceeds 55 minutes limit", duration_seconds)
+            }));
+        }
+
 		let direct_url = match resolve_direct_stream_url(&video_id, Some("360"), false, &data.config).await {
 			Ok(url) => url,
 			Err(e) => {
