@@ -3089,69 +3089,36 @@ fn serve_mp4_from_cache(
     req: &HttpRequest,
     duration_seconds: Option<u64>,
 ) -> HttpResponse {
-    let file_size = match fs::metadata(path) {
-        Ok(m) => m.len(),
-        Err(_) => return HttpResponse::NotFound().finish(),
-    };
-
-    if req.method() == actix_web::http::Method::HEAD {
-        let mut builder = HttpResponse::Ok();
-        builder
-            .insert_header((CONTENT_TYPE, "video/mp4"))
-            .insert_header(("Accept-Ranges", "bytes"))
-            .insert_header((CONTENT_LENGTH, file_size.to_string()));
-        if let Some(secs) = duration_seconds {
-            builder.insert_header(("X-Duration-Seconds", secs.to_string()));
+    // Используем встроенный NamedFile от Actix. 
+    // Он автоматически, невероятно быстро и без расхода RAM обрабатывает:
+    // 1. Заголовки Range (перемотку)
+    // 2. HEAD запросы
+    // 3. Отдачу видео (через Zero-Copy / sendfile)
+    match actix_files::NamedFile::open(path) {
+        Ok(named_file) => {
+            let mut response = named_file.into_response(req);
+            
+            // Оставляем кастомные заголовки, если плееру Symbian нужна помощь с длительностью
+            if let Some(secs) = duration_seconds {
+                let s = secs.to_string();
+                if let Ok(val) = actix_web::http::header::HeaderValue::from_str(&s) {
+                    response.headers_mut().insert(
+                        actix_web::http::header::HeaderName::from_static("x-duration-seconds"),
+                        val.clone()
+                    );
+                    response.headers_mut().insert(
+                        actix_web::http::header::HeaderName::from_static("x-content-duration"),
+                        val
+                    );
+                }
+            }
+            response
         }
-        return builder.finish();
-    }
-
-    let range_header = req.headers().get("Range").and_then(|v| v.to_str().ok());
-    let (start, end, status) = if let Some(range) = range_header {
-        if let Some(cap) = regex::Regex::new(r"bytes=(\d+)-(\d*)").ok().and_then(|r| r.captures(range)) {
-            let s = cap.get(1).and_then(|m| m.as_str().parse::<u64>().ok()).unwrap_or(0);
-            let e = cap.get(2).and_then(|m| m.as_str().parse::<u64>().ok()).unwrap_or(file_size - 1);
-            (s, e.min(file_size - 1), actix_web::http::StatusCode::PARTIAL_CONTENT)
-        } else {
-            (0, file_size - 1, actix_web::http::StatusCode::OK)
+        Err(e) => {
+            log::error!("Failed to open cache file: {}", e);
+            HttpResponse::NotFound().finish()
         }
-    } else {
-        (0, file_size - 1, actix_web::http::StatusCode::OK)
-    };
-
-    let mut std_file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return HttpResponse::InternalServerError().finish(),
-    };
-
-    // ВОТ ОН: Недостающий Seek! Перематываем файл к запрошенному байту.
-    if let Err(_) = std_file.seek(std::io::SeekFrom::Start(start)) {
-        return HttpResponse::InternalServerError().finish();
     }
-
-    // Рассчитываем, сколько байт нужно отдать
-    let limit = end.saturating_sub(start) + 1;
-    let tokio_file = tokio::fs::File::from_std(std_file);
-    
-    // Берем только запрошенное количество байт
-    let reader = tokio_file.take(limit);
-    let stream = ReaderStream::with_capacity(reader, 65536);
-
-    let mut builder = HttpResponse::build(status);
-    builder
-        .insert_header((CONTENT_TYPE, "video/mp4"))
-        .insert_header(("Accept-Ranges", "bytes"))
-        .insert_header((CONTENT_LENGTH, limit.to_string()));
-
-    if status == actix_web::http::StatusCode::PARTIAL_CONTENT {
-        builder.insert_header((CONTENT_RANGE, format!("bytes {}-{}/{}", start, end, file_size)));
-    }
-
-    if let Some(secs) = duration_seconds {
-        builder.insert_header(("X-Duration-Seconds", secs.to_string()));
-    }
-
-    builder.streaming(stream)
 }
 
 async fn get_channel_id_from_video(
