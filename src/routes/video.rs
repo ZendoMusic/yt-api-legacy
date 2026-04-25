@@ -204,7 +204,7 @@ async fn download_mux_to_temp_file(
         cmd.arg("-f").arg(&format_selector)
            .arg("--merge-output-format").arg("mp4")
            .arg("--output").arg(&output_template_str)
-           .arg("--ffmpeg-location").arg(&ffmpeg)
+		   .arg("-N").arg("4")
            .arg("--no-playlist")
            .arg("--force-overwrites")
            .arg("--postprocessor-args").arg("ffmpeg:-movflags +faststart");
