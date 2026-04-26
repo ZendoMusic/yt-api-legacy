@@ -2401,11 +2401,10 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
             return HttpResponse::BadRequest().json(serde_json::json!({
                 "error": "Unsupported codec",
                 "details": format!("Codec '{}' is not supported. Available: mpeg4, h263", codec_str),
-                "supported_codecs": ["mpeg4", "h263"]
+                "supported_codecs":["mpeg4", "h263"]
             }));
         }
 
-        // Get video duration and check if it's longer than 55 minutes
         let player_response = match fetch_player_response(&video_id, &data.config).await {
             Ok(data) => data,
             Err(e) => {
@@ -2425,9 +2424,7 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
 
         let direct_url = match resolve_direct_stream_url(&video_id, Some("360"), false, &data.config).await {
             Ok(url) => {
-                // Если yt-dlp вернул HLS для старых кодеков, форсируем MP4
                 if url.contains(".m3u8") {
-                    log::warn!("YT-DLP вернул HLS для {}, форсируем MP4-поиск...", video_id);
                     match resolve_direct_stream_url(&video_id, None, false, &data.config).await {
                         Ok(u) => u,
                         Err(_) => url,
@@ -2436,27 +2433,17 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
                     url
                 }
             },
-			Err(e) => {
-				return HttpResponse::InternalServerError().json(serde_json::json!({
-					"error": "Failed to resolve video url for conversion",
-					"details": e
-				}));
-			}
-		};
-		let user_agent = data.config.get_innertube_user_agent();
-		let permit = data.codec_semaphore.clone().acquire_owned().await.ok();
-
-
-        let tmp_for_conversion = data.config.cache.temp_dir.as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| env::temp_dir());
-        if let Err(e) = fs::create_dir_all(&tmp_for_conversion) {
-            log::warn!("Не удалось создать временную папку {}: {}", tmp_for_conversion.display(), e);
-        }
-
-		return stream_converted_video(&direct_url, &user_agent, &video_id, codec_str, permit, tmp_for_conversion);
-	}
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": "Failed to resolve video url for conversion",
+                    "details": e
+                }));
+            }
+        };
+        let user_agent = data.config.get_innertube_user_agent();
+        let permit = data.codec_semaphore.clone().acquire_owned().await.ok();
+        return stream_converted_video(&direct_url, &user_agent, &video_id, codec_str, permit);
+    }
 
     // 2. HLS
     let hls_only = query_params.get("hls").map(|v| v == "true").unwrap_or(false);
@@ -2481,7 +2468,6 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
     let proxy_param = query_params.get("proxy").map(|p| p.to_lowercase()).unwrap_or_else(|| "true".to_string());
     let use_proxy = proxy_param != "false";
 
-    // Получаем инфо о видео (нам нужна длительность)
     let player_response = match fetch_player_response(&video_id, &data.config).await {
         Ok(data) => data,
         Err(e) => {
@@ -2499,61 +2485,72 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
         .and_then(|q| parse_quality_height(q))
         .unwrap_or_else(|| parse_quality_height(&data.config.video.default_quality).unwrap_or(360));
 
-    // Ограничение для ОЧЕНЬ длинных видео: 
-    // Если > 30 минут, не даём склеивать качество выше 480p, чтобы сервер не завис
     if target_height > 480 && duration_seconds > 1800 {
-        log::info!("Video > 30m ({}s). Capping to 480p for stability.", duration_seconds);
         target_height = 480;
     }
 
-    // --- НОВАЯ ЛОГИКА КАЧЕСТВА ---
-
-    // Если запрошено ИМЕННО 360p, пытаемся отдать готовый файл itag=18
-    // Это экономит мощности сервера, так как YouTube сам хранит аудио и видео вместе для 360p
-    if target_height == 360 {
-        if let Some(u) = resolve_direct_stream_url(&video_id, Some("360"), false, &data.config).await.ok() {
-            // Отдаем только если это честный цельный MP4
-            if !u.contains(".m3u8") && u.contains("itag=18") {
-                log::info!("Found ready 360p mp4 stream (itag=18) for {}", video_id);
+    // =====================================================================
+    // 3. ФАСТ-ТРЕК (Fast Track) - 0 миллисекунд задержки
+    // Ищем готовый цельный файл (аудио+видео) прямо в JSON от YouTube
+    // =====================================================================
+    let mut instant_url = None;
+    if let Some(streaming) = player_response.get("streamingData") {
+        if let Some(formats) = streaming.get("formats").and_then(|f| f.as_array()) {
+            for f in formats {
+                let label = f.get("qualityLabel").and_then(|v| v.as_str()).unwrap_or("");
+                let height: u32 = label.trim_end_matches('p').parse().unwrap_or(0);
                 
-                // Проксируем или перенаправляем (с обработкой HEAD)
-                if req.method() == actix_web::http::Method::HEAD {
-                    let client = Client::new();
-                    return match client.head(&u).send().await {
-                        Ok(resp) => {
-                            let mut builder = HttpResponse::build(resp.status());
-                            if let Some(len) = resp.headers().get(CONTENT_LENGTH) {
-                                builder.insert_header((CONTENT_LENGTH, len.clone()));
-                            }
-                            if let Some(range) = resp.headers().get(CONTENT_RANGE) {
-                                builder.insert_header((CONTENT_RANGE, range.clone()));
-                            }
-                            builder.insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")));
-                            builder.finish()
-                        }
-                        Err(_) => HttpResponse::Ok().finish(),
-                    };
-                } else if !use_proxy {
-                    return HttpResponse::Found().insert_header((LOCATION, u)).finish();
-                } else {
-                    return proxy_stream_response(&u, &req, "video/mp4").await;
+                // Если совпадает разрешение, или если запросили 360p и нашли itag=18
+                if height == target_height || (target_height == 360 && f.get("itag").and_then(|i| i.as_u64()) == Some(18)) {
+                    if let Some(url) = f.get("url").and_then(|u| u.as_str()) {
+                        instant_url = Some(url.to_string());
+                        break;
+                    }
                 }
             }
         }
     }
 
-    // ДЛЯ ВСЕХ ОСТАЛЬНЫХ СЛУЧАЕВ (144p, 240p, 480p, 720p, 1080p, или если 360p был HLS)
-    // Скачиваем DASH видео и аудио, склеиваем через ffmpeg
+    // Если фаст-трек сработал, моментально отдаём проксированный поток или редирект!
+    if let Some(url) = instant_url {
+        log::info!("Fast Track! Instant URL found for {}p. Bypassing yt-dlp.", target_height);
+        
+        if req.method() == actix_web::http::Method::HEAD {
+            let client = Client::new();
+            return match client.head(&url).send().await {
+                Ok(resp) => {
+                    let mut builder = HttpResponse::build(resp.status());
+                    if let Some(len) = resp.headers().get(CONTENT_LENGTH) {
+                        builder.insert_header((CONTENT_LENGTH, len.clone()));
+                    }
+                    if let Some(range) = resp.headers().get(CONTENT_RANGE) {
+                        builder.insert_header((CONTENT_RANGE, range.clone()));
+                    }
+                    builder.insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")));
+                    builder.finish()
+                }
+                Err(_) => HttpResponse::Ok().finish(),
+            };
+        } else if !use_proxy {
+            return HttpResponse::Found().insert_header((LOCATION, url)).finish();
+        } else {
+            return proxy_stream_response(&url, &req, "video/mp4").await;
+        }
+    }
+
+    // =====================================================================
+    // 4. СЛОЖНЫЕ ФОРМАТЫ (144p, 240p, VEVO клипы с шифрованием)
+    // Скачиваем 1 раз, сохраняем в кэш. Следующие запросы от плеера 
+    // обслуживаются моментально за счет проверки final_path.exists().
+    // =====================================================================
     log::info!("Target quality {}p requires server-side muxing for {}", target_height, video_id);
     
-    match download_mux_to_temp_file(video_id.clone(), target_height, &data.config.cache).await {
+    match download_mux_to_temp_file(video_id.clone(), target_height).await {
         Ok(path) => {
-            log::info!("Download/mux complete: {}. Serving file via ReaderStream.", path.display());
-            // Функция serve_mp4_from_cache теперь отдаёт поток и правильно отвечает на HEAD запросы
             return serve_mp4_from_cache(&path, &req, Some(duration_seconds));
         },
         Err(e) => {
-             log::error!("Failed to download/mux video: {}", e);
+             log::error!("Failed to prepare video: {}", e);
              return HttpResponse::InternalServerError().json(serde_json::json!({
                 "error": "Failed to prepare video file",
                 "details": e
