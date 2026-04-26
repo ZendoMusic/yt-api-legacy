@@ -2442,7 +2442,7 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
         };
         let user_agent = data.config.get_innertube_user_agent();
         let permit = data.codec_semaphore.clone().acquire_owned().await.ok();
-        return stream_converted_video(&direct_url, &user_agent, &video_id, codec_str, permit);
+        return stream_converted_video(&direct_url, &user_agent, &video_id, codec_str, permit, tmp_for_conversion);
     }
 
     // 2. HLS
