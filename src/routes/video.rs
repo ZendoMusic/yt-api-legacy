@@ -2545,7 +2545,7 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
     // =====================================================================
     log::info!("Target quality {}p requires server-side muxing for {}", target_height, video_id);
     
-    match download_mux_to_temp_file(video_id.clone(), target_height).await {
+    match download_mux_to_temp_file(video_id.clone(), target_height, &data.config.cache).await {
         Ok(path) => {
             return serve_mp4_from_cache(&path, &req, Some(duration_seconds));
         },
