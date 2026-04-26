@@ -207,7 +207,7 @@ async fn download_mux_to_temp_file(
 		   .arg("-N").arg("4")
            .arg("--no-playlist")
            .arg("--force-overwrites")
-           .arg("--postprocessor-args").arg("ffmpeg:-af aresample=44100 -max_interleave_delta 0 -movflags +faststart");
+           .arg("--postprocessor-args").arg("ffmpeg:-movflags +faststart");
 
         if let Some(c) = cookie_arg { cmd.arg("--cookies").arg(c); }
         
@@ -2387,178 +2387,118 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
 
     let video_id = match query_params.get("video_id") {
         Some(id) => id.clone(),
-        None => {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "video_id parameter is required"
-            }));
-        }
+        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "video_id required"})),
     };
 
-    // 1. Старые кодеки (всегда конвертация на лету)
+    // 1. Старые кодеки (Symbian 9.1/9.2 - 3gp конвертация)
     let codec = query_params.get("codec").map(|c| c.as_str());
     if let Some(codec_str) = codec {
-        if codec_str != "mpeg4" && codec_str != "h263" {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Unsupported codec",
-                "details": format!("Codec '{}' is not supported. Available: mpeg4, h263", codec_str),
-                "supported_codecs":["mpeg4", "h263"]
-            }));
-        }
-
         let player_response = match fetch_player_response(&video_id, &data.config).await {
-            Ok(data) => data,
-            Err(e) => {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Failed to fetch player response",
-                    "details": e
-                }));
-            }
+            Ok(data) => data, Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
         };
         let duration_seconds = get_duration_from_player_response(&player_response);
-        if duration_seconds > 3300 {
-            return HttpResponse::BadRequest().json(serde_json::json!({
-                "error": "Video too long for conversion",
-                "details": format!("Video duration ({}s) exceeds 55 minutes limit", duration_seconds)
-            }));
+        if duration_seconds < 3300 {
+            let direct_url = resolve_direct_stream_url(&video_id, Some("360"), false, &data.config).await.unwrap_or_default();
+            let user_agent = data.config.get_innertube_user_agent();
+            let permit = data.codec_semaphore.clone().acquire_owned().await.ok();
+            return stream_converted_video(&direct_url, &user_agent, &video_id, codec_str, permit);
         }
-
-        let direct_url = match resolve_direct_stream_url(&video_id, Some("360"), false, &data.config).await {
-            Ok(url) => {
-                if url.contains(".m3u8") {
-                    match resolve_direct_stream_url(&video_id, None, false, &data.config).await {
-                        Ok(u) => u,
-                        Err(_) => url,
-                    }
-                } else {
-                    url
-                }
-            },
-            Err(e) => {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Failed to resolve video url for conversion",
-                    "details": e
-                }));
-            }
-        };
-        let user_agent = data.config.get_innertube_user_agent();
-        let permit = data.codec_semaphore.clone().acquire_owned().await.ok();
-		let tmp_for_conversion = data.config.cache.temp_dir.as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| env::temp_dir());
-        return stream_converted_video(&direct_url, &user_agent, &video_id, codec_str, permit, tmp_for_conversion);
     }
 
-    // 2. HLS
-    let hls_only = query_params.get("hls").map(|v| v == "true").unwrap_or(false);
-    if hls_only {
-        match get_hls_manifest_url(&video_id, &data.config).await {
-            Ok(manifest_url) => {
-                return HttpResponse::Ok().json(serde_json::json!({
-                    "hls_manifest_url": manifest_url,
-                    "video_id": video_id,
-                    "message": "HLS Manifest URL ready"
-                }));
-            },
-            Err(e) => {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "error": "Failed to get HLS manifest URL",
-                    "details": e
-                }));
-            }
+    let requested_quality = query_params.get("quality").map(|q| q.as_str());
+    let mut target_height = requested_quality
+        .and_then(|q| parse_quality_height(q))
+        .unwrap_or_else(|| parse_quality_height(&data.config.video.default_quality).unwrap_or(360));
+
+    // =====================================================================
+    // 2. СВЕРХБЫСТРЫЙ ПУТЬ (КЭШ)
+    // Проверяем, есть ли уже готовый склеенный файл в /tmp.
+    // =====================================================================
+    let temp_dir = std::path::PathBuf::from("/tmp");
+    let cached_file_path = temp_dir.join(format!("sym_video_{}_{}p.mp4", video_id, target_height));
+    
+    if cached_file_path.exists() {
+        log::info!("Serving fast-track cache for chunk request: {}", cached_file_path.display());
+        if let Ok(named_file) = actix_files::NamedFile::open(&cached_file_path) {
+            return named_file.into_response(&req);
         }
+    }
+
+    // =====================================================================
+    // 3. ЗАГРУЗКА ИНФОРМАЦИИ О ВИДЕО
+    // =====================================================================
+    let player_response = match fetch_player_response(&video_id, &data.config).await {
+        Ok(data) => data,
+        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({"error": e})),
+    };
+    let duration_seconds = get_duration_from_player_response(&player_response);
+
+    // Защита сервера от тяжелых видео
+    if target_height > 720 && duration_seconds > 1800 {
+        log::info!("Video > 30m. Capping to 720p.");
+        target_height = 720;
+        let new_url = format!("/direct_url?video_id={}&quality=720", video_id);
+        return HttpResponse::Found().insert_header((LOCATION, new_url)).finish();
     }
 
     let proxy_param = query_params.get("proxy").map(|p| p.to_lowercase()).unwrap_or_else(|| "true".to_string());
     let use_proxy = proxy_param != "false";
 
-    let player_response = match fetch_player_response(&video_id, &data.config).await {
-        Ok(data) => data,
-        Err(e) => {
-             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to fetch player response",
-                "details": e
-            }));
-        }
-    };
-
-    let duration_seconds = get_duration_from_player_response(&player_response);
-    let requested_quality = query_params.get("quality").map(|q| q.as_str());
-    
-    let mut target_height = requested_quality
-        .and_then(|q| parse_quality_height(q))
-        .unwrap_or_else(|| parse_quality_height(&data.config.video.default_quality).unwrap_or(360));
-
-    if target_height > 480 && duration_seconds > 1800 {
-        target_height = 480;
-    }
-
     // =====================================================================
-    // 3. ФАСТ-ТРЕК (Fast Track) - 0 миллисекунд задержки
-    // Ищем готовый цельный файл (аудио+видео) прямо в JSON от YouTube
+    // 4. ПРЯМОЕ ПРОКСИРОВАНИЕ ДЛЯ 360p (ФАСТ-ТРЕК)
     // =====================================================================
-    let mut instant_url = None;
-    if let Some(streaming) = player_response.get("streamingData") {
-        if let Some(formats) = streaming.get("formats").and_then(|f| f.as_array()) {
-            for f in formats {
-                let label = f.get("qualityLabel").and_then(|v| v.as_str()).unwrap_or("");
-                let height: u32 = label.trim_end_matches('p').parse().unwrap_or(0);
-                
-                // Если совпадает разрешение, или если запросили 360p и нашли itag=18
-                if height == target_height || (target_height == 360 && f.get("itag").and_then(|i| i.as_u64()) == Some(18)) {
-                    if let Some(url) = f.get("url").and_then(|u| u.as_str()) {
-                        instant_url = Some(url.to_string());
-                        break;
+    if target_height == 360 {
+        if let Some(streaming) = player_response.get("streamingData") {
+            if let Some(formats) = streaming.get("formats").and_then(|f| f.as_array()) {
+                for f in formats {
+                    if f.get("itag").and_then(|i| i.as_u64()) == Some(18) {
+                        if let Some(url) = f.get("url").and_then(|u| u.as_str()) {
+                            log::info!("Fast Track! Serving 360p via proxy/redirect for {}", video_id);
+                            
+                            if req.method() == actix_web::http::Method::HEAD {
+                                let client = Client::new();
+                                return match client.head(url).send().await {
+                                    Ok(resp) => {
+                                        let mut builder = HttpResponse::build(resp.status());
+                                        if let Some(len) = resp.headers().get(CONTENT_LENGTH) {
+                                            builder.insert_header((CONTENT_LENGTH, len.clone()));
+                                        }
+                                        if let Some(range) = resp.headers().get(CONTENT_RANGE) {
+                                            builder.insert_header((CONTENT_RANGE, range.clone()));
+                                        }
+                                        builder.insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")));
+                                        builder.finish()
+                                    }
+                                    Err(_) => HttpResponse::Ok().finish(),
+                                };
+                            } else if !use_proxy {
+                                return HttpResponse::Found().insert_header((LOCATION, url)).finish();
+                            } else {
+                                return proxy_stream_response(url, &req, "video/mp4").await;
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    // Если фаст-трек сработал, моментально отдаём проксированный поток или редирект!
-    if let Some(url) = instant_url {
-        log::info!("Fast Track! Instant URL found for {}p. Bypassing yt-dlp.", target_height);
-        
-        if req.method() == actix_web::http::Method::HEAD {
-            let client = Client::new();
-            return match client.head(&url).send().await {
-                Ok(resp) => {
-                    let mut builder = HttpResponse::build(resp.status());
-                    if let Some(len) = resp.headers().get(CONTENT_LENGTH) {
-                        builder.insert_header((CONTENT_LENGTH, len.clone()));
-                    }
-                    if let Some(range) = resp.headers().get(CONTENT_RANGE) {
-                        builder.insert_header((CONTENT_RANGE, range.clone()));
-                    }
-                    builder.insert_header((CONTENT_TYPE, HeaderValue::from_static("video/mp4")));
-                    builder.finish()
-                }
-                Err(_) => HttpResponse::Ok().finish(),
-            };
-        } else if !use_proxy {
-            return HttpResponse::Found().insert_header((LOCATION, url)).finish();
-        } else {
-            return proxy_stream_response(&url, &req, "video/mp4").await;
-        }
-    }
-
     // =====================================================================
-    // 4. СЛОЖНЫЕ ФОРМАТЫ (144p, 240p, VEVO клипы с шифрованием)
-    // Скачиваем 1 раз, сохраняем в кэш. Следующие запросы от плеера 
-    // обслуживаются моментально за счет проверки final_path.exists().
+    // 5. СКАЧИВАНИЕ И КЭШИРОВАНИЕ (144p, 240p, 480p+)
     // =====================================================================
-    log::info!("Target quality {}p requires server-side muxing for {}", target_height, video_id);
+    log::info!("Downloading and caching video {} at {}p...", video_id, target_height);
     
-    match download_mux_to_temp_file(video_id.clone(), target_height, &data.config.cache).await {
+    match download_mux_to_temp_file(video_id.clone(), target_height).await {
         Ok(path) => {
-            return serve_mp4_from_cache(&path, &req, Some(duration_seconds));
+            if let Ok(named_file) = actix_files::NamedFile::open(&path) {
+                return named_file.into_response(&req);
+            } else {
+                return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to read cached file"}));
+            }
         },
         Err(e) => {
              log::error!("Failed to prepare video: {}", e);
-             return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to prepare video file",
-                "details": e
-            }));
+             return HttpResponse::InternalServerError().json(serde_json::json!({"error": e}));
         }
     }
 }
