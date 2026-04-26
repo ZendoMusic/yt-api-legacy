@@ -2401,7 +2401,11 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
             let direct_url = resolve_direct_stream_url(&video_id, Some("360"), false, &data.config).await.unwrap_or_default();
             let user_agent = data.config.get_innertube_user_agent();
             let permit = data.codec_semaphore.clone().acquire_owned().await.ok();
-            return stream_converted_video(&direct_url, &user_agent, &video_id, codec_str, permit);
+			let tmp_for_conversion = data.config.cache.temp_dir.as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env::temp_dir());
+            return stream_converted_video(&direct_url, &user_agent, &video_id, codec_str, permit, tmp_for_conversion);
         }
     }
 
@@ -2488,7 +2492,7 @@ pub async fn direct_url(req: HttpRequest, data: web::Data<crate::AppState>) -> i
     // =====================================================================
     log::info!("Downloading and caching video {} at {}p...", video_id, target_height);
     
-    match download_mux_to_temp_file(video_id.clone(), target_height).await {
+    match download_mux_to_temp_file(video_id.clone(), target_height, &data.config.cache).await {
         Ok(path) => {
             if let Ok(named_file) = actix_files::NamedFile::open(&path) {
                 return named_file.into_response(&req);
