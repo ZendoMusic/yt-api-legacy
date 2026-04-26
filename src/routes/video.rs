@@ -207,7 +207,7 @@ async fn download_mux_to_temp_file(
 		   .arg("-N").arg("4")
            .arg("--no-playlist")
            .arg("--force-overwrites")
-           .arg("--postprocessor-args").arg("ffmpeg:-movflags +faststart");
+           .arg("--postprocessor-args").arg("ffmpeg:-af aresample=44100 -max_interleave_delta 0 -movflags +faststart");
 
         if let Some(c) = cookie_arg { cmd.arg("--cookies").arg(c); }
         
