@@ -38,19 +38,27 @@ async fn fetch_json<T: for<'de> Deserialize<'de>>(
     base: &str,
     path: &str,
 ) -> Result<T, String> {
-    let url = format!("{}{}", base.trim_end_matches('/'), path);
+    // Извлекаем порт из base, чтобы заставить сервер всегда обращаться к себе 
+    // по безопасному локальному адресу, минуя сетевой интерфейс и фаерволы
+    let port = base.split(':').last().unwrap_or("2823").trim_end_matches('/');
+    let local_url = format!("http://127.0.0.1:{}{}", port, path);
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .no_proxy() // отключаем системные прокси и VPN для локальных запросов
         .build()
         .map_err(|e| e.to_string())?;
+
     let resp = client
-        .get(&url)
+        .get(&local_url)
         .send()
         .await
         .map_err(|e| e.to_string())?;
+
     if !resp.status().is_success() {
         return Err(format!("API returned {}", resp.status()));
     }
+
     resp.json::<T>().await.map_err(|e| e.to_string())
 }
 
