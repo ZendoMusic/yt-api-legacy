@@ -255,6 +255,8 @@ async fn render_sidebar_with_auth(
                 auth_config,
                 config,
                 main_url_trimmed,
+				"en",
+				"US",
             ).await;
             render_sidebar_subscriptions(&subscriptions, &main_url)
         }
@@ -349,6 +351,8 @@ pub async fn page_root(
             main_url_trimmed,
             24,
 			None,
+			"en",
+			"US",
         )
         .await
 		.map(|resp| resp.videos)
@@ -364,6 +368,8 @@ pub async fn page_root(
                 config,
                 main_url_trimmed,
                 24,
+				"en",
+				"US",
             )
             .await
         }
@@ -381,6 +387,8 @@ pub async fn page_root(
                 &auth_config,
                 config,
                 main_url_trimmed,
+				"en",
+				"US",
             ).await;
             render_sidebar_subscriptions(&subscriptions, &main_url)
         }

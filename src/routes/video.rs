@@ -1822,6 +1822,9 @@ pub async fn get_ytvideo_info(
     let cfg = extract_ytcfg(&html);
     let pr = extract_initial_player_response(&html);
     let api_key = cfg.get("INNERTUBE_API_KEY").and_then(|v| v.as_str()).unwrap_or(innertube_key);
+	let hl = query_params.get("hl").cloned().unwrap_or_else(|| "en".to_string());
+    let gl = query_params.get("gl").cloned().unwrap_or_else(|| "US".to_string());
+	
     let mut ctx = cfg.get("INNERTUBE_CONTEXT").cloned().unwrap_or_else(|| {
         serde_json::json!({
             "client": {
@@ -1832,8 +1835,8 @@ pub async fn get_ytvideo_info(
     });
     
     if let Some(client) = ctx.get_mut("client").and_then(|c| c.as_object_mut()) {
-        client.insert("gl".to_string(), serde_json::Value::String("US".to_string())); // Set region to USA
-        client.insert("hl".to_string(), serde_json::Value::String("en-US".to_string())); // Set language to English (USA)
+        client.insert("gl".to_string(), serde_json::Value::String(gl.clone())); // Set region
+        client.insert("hl".to_string(), serde_json::Value::String(hl.clone())); // Set language
     }
     
     let next_payload = serde_json::json!({

@@ -545,6 +545,7 @@ async fn fetch_history_page(
     access_token: &str,
     continuation: Option<String>,
     config: &crate::config::Config,
+	hl: &str, gl: &str,
 ) -> Option<serde_json::Value> {
     let client = Client::new();
     let mut payload = serde_json::json!({
@@ -749,6 +750,7 @@ pub async fn fetch_history_for_token(
     config: &crate::config::Config,
     base_trimmed: &str,
     count: usize,
+	hl: &str, gl: &str,
 ) -> Vec<HistoryItem> {
     let access_token = match refresh_access_token(refresh_token, auth_config).await {
         Ok(t) => t,
@@ -758,7 +760,7 @@ pub async fn fetch_history_for_token(
     let mut continuation: Option<String> = None;
 
     while videos.len() < count {
-        let page = fetch_history_page(&access_token, continuation.clone(), config).await;
+        let page = fetch_history_page(&access_token, continuation.clone(), config, &hl, &gl).await;
         if page.is_none() {
             break;
         }
@@ -784,6 +786,7 @@ pub async fn fetch_recommendations_for_token(
     base_trimmed: &str,
     count: usize,
     page_token: Option<String>, 
+	hl: &str, gl: &str,
 ) -> Option<RecommendationsResponse> {
     let access_token = refresh_access_token(refresh_token, auth_config).await.ok()?;
     let api_key = config.get_innertube_key()?;
@@ -852,7 +855,10 @@ pub async fn get_recommendations(
     let count: usize = query_params.get("count").and_then(|c| c.parse().ok()).unwrap_or(20); // Ограничим до 20 за раз для скорости
     let page_token = query_params.get("pageToken").cloned();
 
-    match fetch_recommendations_for_token(&refresh_token, &auth_config, &data.config, &base_trimmed, count, page_token).await {
+	let hl = query_params.get("hl").cloned().unwrap_or_else(|| "en".to_string());
+    let gl = query_params.get("gl").cloned().unwrap_or_else(|| "US".to_string());
+	
+    match fetch_recommendations_for_token(&refresh_token, &auth_config, &data.config, &base_trimmed, count, page_token, &hl, &gl).await {
         Some(response) => HttpResponse::Ok().json(response),
         None => HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to get recommendations"})),
     }
@@ -967,6 +973,7 @@ pub async fn fetch_subscriptions_for_token(
     auth_config: &AuthConfig,
     config: &crate::config::Config,
     base_trimmed: &str,
+	hl: &str, gl: &str,
 ) -> Vec<SubscriptionItem> {
     let access_token = match refresh_access_token(refresh_token, auth_config).await {
         Ok(t) => t,
@@ -1039,12 +1046,15 @@ pub async fn get_subscriptions(
         Ok(t) => t,
         Err(e) => return HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid refresh token", "details": e})),
     };
+	
+	let hl = query_params.get("hl").cloned().unwrap_or_else(|| "en".to_string());
+    let gl = query_params.get("gl").cloned().unwrap_or_else(|| "US".to_string());
 
     let client = reqwest::Client::new();
     let payload = serde_json::json!({
         "context": {
             "client": {
-                "hl": "en", "gl": "US", "deviceMake": "Samsung", "deviceModel": "SmartTV",
+                "hl": hl, "gl": gl, "deviceMake": "Samsung", "deviceModel": "SmartTV",
                 "userAgent": "Mozilla/5.0 (SMART-TV; Linux; Tizen 5.0) AppleWebKit/538.1",
                 "clientName": "TVHTML5", "clientVersion": "7.20250209.19.00",
                 "osName": "Tizen", "osVersion": "5.0", "platform": "TV",
@@ -1114,10 +1124,13 @@ pub async fn get_subscriptions_session(
             .and_then(|c| token_store.get_token(c.value()))
             .filter(|t| !t.is_empty() && !t.starts_with("Error"))
     };
+	
+	let hl = query_params.get("hl").cloned().unwrap_or_else(|| "en".to_string());
+    let gl = query_params.get("gl").cloned().unwrap_or_else(|| "US".to_string());
     
     let subscriptions = match refresh_token {
         Some(ref token) => {
-            fetch_subscriptions_for_token(token, &auth_config, &data.config, base_trimmed).await
+            fetch_subscriptions_for_token(token, &auth_config, &data.config, base_trimmed, &hl, &gl).await
         }
         None => Vec::new(),
     };
@@ -1177,11 +1190,14 @@ pub async fn get_history(
             }));
         }
     };
+	
+	let hl = query_params.get("hl").cloned().unwrap_or_else(|| "en".to_string());
+    let gl = query_params.get("gl").cloned().unwrap_or_else(|| "US".to_string());
 
     let mut videos: Vec<HistoryItem> = Vec::new();
     let mut continuation: Option<String> = None;
     while videos.len() < count {
-        let page = fetch_history_page(&access_token, continuation.clone(), &data.config).await;
+        let page = fetch_history_page(&access_token, continuation.clone(), &data.config, &hl, &gl).await;
         if page.is_none() {
             break;
         }

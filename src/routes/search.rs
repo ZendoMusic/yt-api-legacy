@@ -250,10 +250,15 @@ pub async fn get_top_videos(req: HttpRequest, data: web::Data<crate::AppState>) 
     let apikey = config.get_api_key_rotated();
 
     let client = Client::new();
+	
+	let hl = req.query_string().split('&').find_map(|p| { let mut i=p.split('='); if i.next()==Some("hl") { i.next() } else { None } }).unwrap_or("en");
+    let gl = req.query_string().split('&').find_map(|p| { let mut i=p.split('='); if i.next()==Some("gl") { i.next() } else { None } }).unwrap_or("US");
 
     let url = format!(
-        "https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails&chart=mostPopular&maxResults={}&key={}",
-        count,
+        "https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails&chart=mostPopular&maxResults={}&hl={}&regionCode={}&key={}",
+        count, 
+		hl, 
+		gl,
         apikey
     );
 
@@ -404,13 +409,17 @@ pub async fn get_search_videos(
 
     let client = Client::new();
 
+	let hl = query_params.get("hl").cloned().unwrap_or_else(|| "en".to_string());
+	
+    let gl = query_params.get("gl").cloned().unwrap_or_else(|| "US".to_string());
+
     let payload = serde_json::json!({
         "context": {
             "client": {
                 "clientName": "WEB",
                 "clientVersion": "2.20250101",
-                "hl": "ru",
-                "gl": "RU"
+                "hl": hl,
+                "gl": gl
             }
         },
         "query": query
@@ -504,9 +513,11 @@ pub async fn get_search_suggestions(
         .unwrap();
 
     let encoded_query = urlencoding::encode(query);
+	let hl = query_params.get("hl").cloned().unwrap_or_else(|| "en".to_string());
+    let gl = query_params.get("gl").cloned().unwrap_or_else(|| "US".to_string());
     let url = format!(
-        "https://clients1.google.com/complete/search?client=youtube&hl=en&ds=yt&q={}",
-        encoded_query
+        "https://clients1.google.com/complete/search?client=youtube&hl={}&gl={}&ds=yt&q={}",
+        hl, gl, encoded_query
     );
 
     match client.get(&url).send().await {

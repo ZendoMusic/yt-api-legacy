@@ -111,6 +111,9 @@ pub async fn get_shorts(req: HttpRequest, data: web::Data<crate::AppState>, auth
         .unwrap_or_default();
     
     let sequence_params = query_params.get("sequence");
+	
+	let hl = query_params.get("hl").cloned().unwrap_or_else(|| "en".to_string());
+    let gl = query_params.get("gl").cloned().unwrap_or_else(|| "US".to_string());
 
     // Выбираем эндпоинт: если токена нет — берем начальный "Seedless" ролик, если есть — последовательность
     let (url, payload) = if let Some(token) = sequence_params {
@@ -120,8 +123,8 @@ pub async fn get_shorts(req: HttpRequest, data: web::Data<crate::AppState>, auth
                 "client": {
                     "clientName": "WEB",
                     "clientVersion": "2.20260206.01.00",
-                    "hl": "ru",
-                    "gl": "US"
+                    "hl": hl,
+                    "gl": gl
                 }
             },
             "sequenceParams": token
@@ -135,8 +138,8 @@ pub async fn get_shorts(req: HttpRequest, data: web::Data<crate::AppState>, auth
                 "client": {
                     "clientName": "WEB",
                     "clientVersion": "2.20260206.01.00",
-                    "hl": "ru",
-                    "gl": "US"
+                    "hl": hl,
+                    "gl": gl
                 }
             },
             "inputType": "REEL_WATCH_INPUT_TYPE_SEEDLESS",
