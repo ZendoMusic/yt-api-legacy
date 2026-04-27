@@ -35,13 +35,13 @@ fn load_root_index() -> String {
 }
 
 async fn fetch_json<T: for<'de> Deserialize<'de>>(
-    base: &str,
+    port: u16,
     path: &str,
 ) -> Result<T, String> {
     // Извлекаем порт из base, чтобы заставить сервер всегда обращаться к себе 
     // по безопасному локальному адресу, минуя сетевой интерфейс и фаерволы
-    let port = base.split(':').last().unwrap_or("2823").trim_end_matches('/');
     let local_url = format!("http://127.0.0.1:{}{}", port, path);
+
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -326,7 +326,7 @@ pub async fn page_root(
     let port = config.server.port;
 
     let videos: Vec<TopVideo> = match fetch_json::<Vec<TopVideo>>(
-        &main_url,
+        port,
         "/get_top_videos.php?count=24",
     )
     .await
@@ -803,7 +803,7 @@ pub async fn page_index(
     let main_url = base.clone();
 
     let videos: Vec<TopVideo> = match fetch_json::<Vec<TopVideo>>(
-        &base,
+        config.server.port,
         "/get_top_videos.php?count=24",
     )
     .await
@@ -900,7 +900,7 @@ pub async fn page_results(
         Vec::new()
     } else {
         match fetch_json::<Vec<SearchResult>>(
-            &base,
+            config.server.port,
             &format!("/get_search_videos.php?query={}", search_encoded),
         )
         .await
@@ -1039,7 +1039,7 @@ pub async fn page_watch(
     let base_trimmed = main_url.trim_end_matches('/');
 
     let info: VideoInfoResponse = match fetch_json(
-        &base,
+        config.server.port,
         &format!("/get-ytvideo-info.php?video_id={}", urlencoding::encode(&video_id)),
     )
     .await
@@ -1054,7 +1054,7 @@ pub async fn page_watch(
     };
 
     let related: Vec<RelatedVideo> = fetch_json(
-        &base,
+        config.server.port,
         &format!("/get_related_videos.php?video_id={}", urlencoding::encode(&video_id)),
     )
     .await
@@ -1365,7 +1365,7 @@ pub async fn page_channel(
     let main_url = base.clone();
 
     let channel_response: ChannelVideosResponse = match fetch_json(
-        &base,
+        config.server.port,
         &format!("/get_author_videos.php?author={}", urlencoding::encode(&handle)),
     )
     .await
@@ -1481,7 +1481,7 @@ pub async fn page_embed(
         urlencoding::encode(&video_id)
     );
     let (embed_title, len_sec) = match fetch_json::<VideoInfoResponse>(
-        &base,
+        config.server.port,
         &format!("/get-ytvideo-info.php?video_id={}", urlencoding::encode(&video_id)),
     )
     .await

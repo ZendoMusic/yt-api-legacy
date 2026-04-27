@@ -1340,7 +1340,29 @@ async fn resolve_direct_stream_url(
         attempts.push(None);
 
         let mut last_err = None;
-		let deno_path = if cfg!(target_os = "windows") { "assets/deno.exe" } else { "assets/deno" };
+			// Умный поиск бинарника Deno
+    let deno_path = if cfg!(target_os = "windows") {
+        if std::path::Path::new("assets/deno.exe").exists() {
+            "assets/deno.exe".to_string()
+        } else {
+            "deno".to_string() // Запуск из глобального PATH
+        }
+    } else {
+        // Ищем в домашних директориях Linux
+        let home_deno = std::env::var("HOME")
+            .map(|h| format!("{}/.deno/bin/deno", h))
+            .unwrap_or_default();
+            
+        if std::path::Path::new("assets/deno").exists() {
+            "assets/deno".to_string()
+        } else if !home_deno.is_empty() && std::path::Path::new(&home_deno).exists() {
+            home_deno
+        } else if std::path::Path::new("/usr/bin/deno").exists() {
+            "/usr/bin/deno".to_string()
+        } else {
+            "deno".to_string() // Запуск из глобального PATH (если ничего не нашли)
+        }
+    };
         for cookie in attempts {
             let mut cmd = Command::new(&yt_dlp);
             cmd.arg("-f")
