@@ -198,8 +198,7 @@ async fn download_mux_to_temp_file(
              best[vcodec^=avc][fps<=60][ext=mp4]/\
              bestvideo[vcodec^=avc][ext=mp4]+bestaudio[ext=m4a]/\
              best[vcodec^=avc][ext=mp4]/\
-             best[ext=mp4]",
-            b = max_bitrate
+             best[ext=mp4]"
         );
 
         cmd.arg("-f").arg(&format_selector)
