@@ -194,11 +194,13 @@ async fn download_mux_to_temp_file(
         // 2. Если аудио M4A нет, ищет готовый MP4 с кодеком AVC
         // 3. Запасные варианты (если кодек AVC недоступен, берем что есть, но СТРОГО с нужным разрешением!)
          let format_selector = format!(
-            "bestvideo[vcodec^=avc][fps<=60][ext=mp4]+bestaudio[ext=m4a]/\
+            "best[res={h}][vcodec^=avc][fps<=60][ext=mp4]/\
+             bestvideo[res={h}][vcodec^=avc][fps<=60][ext=mp4]+bestaudio[ext=m4a]/\
              best[vcodec^=avc][fps<=60][ext=mp4]/\
-             bestvideo[vcodec^=avc][ext=mp4]+bestaudio[ext=m4a]/\
-             best[vcodec^=avc][ext=mp4]/\
-             best[ext=mp4]"
+             bestvideo[vcodec^=avc][fps<=60][ext=mp4]+bestaudio[ext=m4a]/\
+             best[res<={h}][vcodec^=avc][ext=mp4]/\
+             bestvideo[res<={h}][vcodec^=avc][ext=mp4]+bestaudio[ext=m4a]",
+            h = height
         );
 
         cmd.arg("-f").arg(&format_selector)
