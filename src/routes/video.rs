@@ -188,17 +188,16 @@ async fn download_mux_to_temp_file(
     let download_result = task::spawn_blocking(move || {
         let mut cmd = Command::new(&yt_dlp);
         
-        // ПРАВИЛЬНЫЙ ФИЛЬТР:
-        // 1. Ищет горизонтальное видео (height) <= запрошенного в кодеке AVC (H.264)
-        // 2. ИЛИ ищет вертикальное видео Shorts (width) <= запрошенного в кодеке AVC
-        // 3. Fallback на готовые файлы, если DASH-потоков нет.
+        // ИДЕАЛЬНЫЙ ФИЛЬТР (Используем res, который берет минимальную сторону):
+        // 1. Ищет лучшее видео (DASH) с нужным разрешением и кодеком AVC + лучшее аудио (M4A)
+        // 2. Если аудио M4A нет, ищет готовый MP4 с кодеком AVC
+        // 3. Запасные варианты (если кодек AVC недоступен, берем что есть, но СТРОГО с нужным разрешением!)
         let format_selector = format!(
-            "bestvideo[height<={}][vcodec^=avc][fps<=30][ext=mp4]+bestaudio[ext=m4a]/\
-             bestvideo[width<={}][vcodec^=avc][fps<=30][ext=mp4]+bestaudio[ext=m4a]/\
-             best[height<={}][vcodec^=avc][fps<=30][ext=mp4]/\
-             best[width<={}][vcodec^=avc][fps<=30][ext=mp4]/\
-             best[ext=mp4]",
-            height, height, height, height
+            "bestvideo[res<={h}][vcodec^=avc][fps<=60][ext=mp4]+bestaudio[ext=m4a]/\
+             best[res<={h}][vcodec^=avc][fps<=60][ext=mp4]/\
+             bestvideo[res<={h}][ext=mp4]+bestaudio[ext=m4a]/\
+             best[res<={h}][ext=mp4]",
+            h = height
         );
 
         cmd.arg("-f").arg(&format_selector)
