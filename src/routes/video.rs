@@ -184,6 +184,7 @@ async fn download_mux_to_temp_file(
     let output_template_str = output_template.to_string_lossy().to_string();
 
     let output_stem = format!("yt_api_video_{}_{}p", video_id, height);
+	
 
     let download_result = task::spawn_blocking(move || {
         let mut cmd = Command::new(&yt_dlp);
@@ -192,15 +193,17 @@ async fn download_mux_to_temp_file(
         // 1. Ищет лучшее видео (DASH) с нужным разрешением и кодеком AVC + лучшее аудио (M4A)
         // 2. Если аудио M4A нет, ищет готовый MP4 с кодеком AVC
         // 3. Запасные варианты (если кодек AVC недоступен, берем что есть, но СТРОГО с нужным разрешением!)
-        let format_selector = format!(
-            "bestvideo[res<={h}][vcodec^=avc][fps<=60][ext=mp4]+bestaudio[ext=m4a]/\
-             best[res<={h}][vcodec^=avc][fps<=60][ext=mp4]/\
-             bestvideo[res<={h}][ext=mp4]+bestaudio[ext=m4a]/\
-             best[res<={h}][ext=mp4]",
-            h = height
+         let format_selector = format!(
+            "bestvideo[vcodec^=avc][fps<=60][ext=mp4]+bestaudio[ext=m4a]/\
+             best[vcodec^=avc][fps<=60][ext=mp4]/\
+             bestvideo[vcodec^=avc][ext=mp4]+bestaudio[ext=m4a]/\
+             best[vcodec^=avc][ext=mp4]/\
+             best[ext=mp4]",
+            b = max_bitrate
         );
 
         cmd.arg("-f").arg(&format_selector)
+           .arg("-S").arg(format!("res:{}", height))
            .arg("--merge-output-format").arg("mp4")
            .arg("--output").arg(&output_template_str)
 		   .arg("-N").arg("4")
